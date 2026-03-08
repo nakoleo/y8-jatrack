@@ -1342,18 +1342,26 @@ export default function App() {
       return acc;
     }, {});
 
-    return Object.keys(byUser)
+    const allUserIds = new Set<string>([
+      ...adminProfiles.map((p) => p.uid),
+      ...Object.keys(byUser),
+      ...Object.keys(adminTargets),
+    ]);
+
+    return Array.from(allUserIds)
       .map((uid) => {
         const profile = profileByUid.get(uid);
         const target = adminTargets[uid] || 0;
+        const credits = byUser[uid]?.credits || 0;
+        const count = byUser[uid]?.count || 0;
         return {
           uid,
           nickname: profile?.nickname || profile?.displayName || uid.slice(0, 6),
           role: profile?.role || 'custom',
           target,
-          credits: byUser[uid].credits,
-          count: byUser[uid].count,
-          percent: Math.round(safePercent(byUser[uid].credits, target)),
+          credits,
+          count,
+          percent: Math.round(safePercent(credits, target)),
         };
       })
       .sort((a, b) => b.credits - a.credits);
