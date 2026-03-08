@@ -42,6 +42,10 @@ KPI tracking app for Y8/PV teams (mobile-first, Firebase + Google integrations).
    - Authentication > Sign-in method > Google
    - Firestore Database
    - Google Drive API (for in-app upload)
+   - OAuth consent mode: `Testing` + add all tester emails in `Test users`
+   - Authorized domains must include:
+     - `jartrack-y8pv.web.app`
+     - `jartrack-y8pv.firebaseapp.com`
 4. Run dev server
    - `npm run dev`
 
@@ -76,4 +80,5 @@ Production URLs:
 - If Google Drive upload fails:
   - Reconnect Google Drive from Settings (consent popup)
   - Verify Google Drive API is enabled in Google Cloud project
+  - Verify OAuth consent is in Testing mode and your account is in Test users
   - Verify Drive folder ID is valid and uploader has permission

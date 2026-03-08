@@ -5,7 +5,7 @@ import {
   Trash2, CheckCircle2, Plus, Minus, Clock, Edit3, X, Settings,
   ChevronDown, FileText, Sparkles, Download, RefreshCw,
   LogOut, ChevronLeft, ChevronRight, TrendingUp, Wifi, WifiOff,
-  Save, Sliders, UserCircle, Upload, ExternalLink,
+  Save, Sliders, UserCircle, Upload, ExternalLink, AlertTriangle,
 } from 'lucide-react';
 import {
   collection, collectionGroup, doc, setDoc, deleteDoc,
@@ -15,7 +15,7 @@ import {
   signInWithPopup, signOut, onAuthStateChanged, type User,
   reauthenticateWithPopup, GoogleAuthProvider,
 } from 'firebase/auth';
-import { db, auth, googleProvider, createDriveProvider } from './firebase';
+import { db, auth, googleProvider, createDriveProvider, firebaseApp } from './firebase';
 import { WORK_GROUPS } from './constants';
 import { WorkEntry, WorkGroups, TabType, UserProfile, RoleId } from './types';
 import { ROLE_DEFAULTS, ROLE_EMOJI } from './roleDefaults';
@@ -24,6 +24,8 @@ import { ROLE_DEFAULTS, ROLE_EMOJI } from './roleDefaults';
 const HOST_EMAIL = 'host.y8@gmail.com';
 const SUPER_ADMIN_EMAIL = 'info.nakoleo@gmail.com';
 const KPI_POLICY_VERSION = 3;
+const EXPECTED_FIREBASE_PROJECT = 'jartrack-y8pv';
+const EXPECTED_FIREBASE_AUTH_DOMAIN = 'jartrack-y8pv.firebaseapp.com';
 
 const ZERO_STARTER_GROUPS: WorkGroups = {
   A: {
@@ -156,6 +158,18 @@ const parseIcal = (text: string, brand: 'y8' | 'pv'): CalEvent[] =>
     } catch { /* skip malformed */ }
     return acc;
   }, []);
+
+const extractGoogleApiReason = (raw: string) => {
+  if (!raw) return '';
+  try {
+    const json = JSON.parse(raw) as {
+      error?: { status?: string; message?: string; errors?: Array<{ reason?: string; message?: string }> };
+    };
+    return json.error?.errors?.[0]?.reason || json.error?.status || json.error?.message || '';
+  } catch {
+    return raw.slice(0, 120);
+  }
+};
 
 const GAS_TEMPLATE = `function cleanName(v) {
   return String(v || '')
@@ -1395,7 +1409,8 @@ export default function App() {
 
     if (!uploadRes.ok) {
       const errText = await uploadRes.text().catch(() => '');
-      console.error('Drive upload:', errText);
+      const reason = extractGoogleApiReason(errText);
+      console.error('Drive upload:', reason || errText);
       if ((uploadRes.status === 404 || uploadRes.status === 400) && driveFolderId.trim()) {
         const fallbackRes = await uploadRequest(buildForm({ name: file.name }));
         if (fallbackRes.ok) {
@@ -1406,6 +1421,12 @@ export default function App() {
         }
       }
       if (uploadRes.status === 403) {
+        if (String(reason).toLowerCase().includes('accessnotconfigured')) {
+          throw new Error('drive_api_not_enabled');
+        }
+        if (String(reason).toLowerCase().includes('insufficient')) {
+          throw new Error('drive_scope_missing');
+        }
         throw new Error('drive_forbidden');
       }
       if (!uploadRes.ok) throw new Error('drive_upload_failed');
@@ -1435,7 +1456,18 @@ export default function App() {
 
   const handleConnectGoogleDrive = async () => {
     const token = await ensureDriveAccessToken();
-    if (token) showToast('เชื่อม Google Drive แล้ว ✓');
+    if (!token) return;
+    try {
+      const aboutRes = await fetch('https://www.googleapis.com/drive/v3/about?fields=user(emailAddress,displayName)', {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!aboutRes.ok) throw new Error('about_failed');
+      const about = await aboutRes.json() as { user?: { emailAddress?: string; displayName?: string } };
+      const label = about.user?.displayName || about.user?.emailAddress || 'บัญชีปัจจุบัน';
+      showToast(`เชื่อม Google Drive แล้ว ✓ (${label})`);
+    } catch {
+      showToast('เชื่อม Google Drive แล้ว ✓');
+    }
   };
 
   const handleDriveFileSelected = async (file: File, mode: 'log' | 'edit') => {
@@ -1453,8 +1485,12 @@ export default function App() {
       const message = (error as { message?: string })?.message || '';
       if (message === 'drive_folder_not_found') {
         showToast('❌ ไม่พบ Drive Folder ID ที่ตั้งไว้');
+      } else if (message === 'drive_api_not_enabled') {
+        showToast('❌ ยังไม่เปิด Drive API ในโปรเจกต์ Google Cloud');
+      } else if (message === 'drive_scope_missing') {
+        showToast('❌ OAuth scope ยังไม่ครบ (ต้องมี drive.file)');
       } else if (message === 'drive_forbidden') {
-        showToast('❌ ไม่มีสิทธิ์อัปโหลด (ตรวจ Drive API/สิทธิ์โฟลเดอร์)');
+        showToast('❌ ไม่มีสิทธิ์อัปโหลด (ตรวจ Test Users/สิทธิ์โฟลเดอร์)');
       } else {
         showToast('❌ อัปโหลด Google Drive ไม่สำเร็จ');
       }
@@ -1589,6 +1625,12 @@ export default function App() {
     currentUser?.displayName ||
     currentUser?.email?.split('@')[0] ||
     'User';
+
+  const runtimeProjectId = String(firebaseApp.options.projectId || '');
+  const runtimeAuthDomain = String(firebaseApp.options.authDomain || '');
+  const firebaseConfigHealthy =
+    runtimeProjectId === EXPECTED_FIREBASE_PROJECT &&
+    runtimeAuthDomain === EXPECTED_FIREBASE_AUTH_DOMAIN;
 
   const exportYearOptions = useMemo(() => {
     const years = new Set<number>([new Date().getFullYear()]);
@@ -2289,6 +2331,39 @@ export default function App() {
                 <ExternalLink size={13} /> เปิดโฟลเดอร์ Drive ที่ตั้งไว้
               </button>
             )}
+            <div className={`px-3.5 py-3 rounded-xl border ${firebaseConfigHealthy ? 'bg-emerald-50 border-emerald-100' : 'bg-amber-50 border-amber-100'}`}>
+              <div className="flex items-start gap-2.5">
+                {firebaseConfigHealthy ? (
+                  <CheckCircle2 size={14} className="text-emerald-500 mt-0.5 shrink-0" />
+                ) : (
+                  <AlertTriangle size={14} className="text-amber-500 mt-0.5 shrink-0" />
+                )}
+                <div className="min-w-0">
+                  <p className={`text-[10px] font-bold uppercase tracking-wider ${firebaseConfigHealthy ? 'text-emerald-600' : 'text-amber-700'}`}>
+                    Drive Preflight
+                  </p>
+                  <p className="text-[11px] text-slate-600 break-all">Project: {runtimeProjectId || '(missing)'}</p>
+                  <p className="text-[11px] text-slate-600 break-all">Auth Domain: {runtimeAuthDomain || '(missing)'}</p>
+                  <p className="text-[10px] text-slate-500 mt-1">
+                    ค่าที่คาดหวัง: {EXPECTED_FIREBASE_PROJECT} / {EXPECTED_FIREBASE_AUTH_DOMAIN}
+                  </p>
+                </div>
+              </div>
+              <div className="grid grid-cols-2 gap-2 mt-2.5">
+                <button
+                  onClick={() => window.open('https://console.cloud.google.com/apis/library/drive.googleapis.com?project=jartrack-y8pv', '_blank')}
+                  className="py-2 bg-white border border-slate-200 rounded-lg text-[10px] font-bold text-slate-600"
+                >
+                  Drive API
+                </button>
+                <button
+                  onClick={() => window.open('https://console.cloud.google.com/apis/credentials/consent?project=jartrack-y8pv', '_blank')}
+                  className="py-2 bg-white border border-slate-200 rounded-lg text-[10px] font-bold text-slate-600"
+                >
+                  OAuth Screen
+                </button>
+              </div>
+            </div>
           </div>
 
           {/* Google Calendar iCal — Y8 */}
