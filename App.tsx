@@ -15,7 +15,7 @@ import {
   signInWithPopup, signOut, onAuthStateChanged, type User,
   reauthenticateWithPopup, GoogleAuthProvider,
 } from 'firebase/auth';
-import { db, auth, googleProvider } from './firebase';
+import { db, auth, googleProvider, createDriveProvider } from './firebase';
 import { WORK_GROUPS } from './constants';
 import { WorkEntry, WorkGroups, TabType, UserProfile, RoleId } from './types';
 import { ROLE_DEFAULTS, ROLE_EMOJI } from './roleDefaults';
@@ -74,10 +74,13 @@ const sheetSafe = (value: string, fallback = 'User') => {
 };
 
 const buildSheetNames = (nickname: string, uid?: string) => {
-  const base = sheetSafe(nickname, `User_${(uid || 'xxxxxx').slice(0, 6)}`);
+  const uidTag = (uid || 'xxxxxx').replace(/[^a-zA-Z0-9]/g, '').slice(0, 6) || 'xxxxxx';
+  const base = sheetSafe(nickname, `User_${uidTag}`).slice(0, 50);
+  const ownerKey = `${base}_${uidTag}`;
   return {
-    masterSheetName: `${base}_KPI_MASTER`,
-    dashboardSheetName: `${base}_Dashboard`,
+    ownerKey,
+    masterSheetName: `${ownerKey}_KPI_MASTER`,
+    dashboardSheetName: `${ownerKey}_Dashboard`,
   };
 };
 
@@ -153,6 +156,88 @@ const parseIcal = (text: string, brand: 'y8' | 'pv'): CalEvent[] =>
     } catch { /* skip malformed */ }
     return acc;
   }, []);
+
+const GAS_TEMPLATE = `function cleanName(v) {
+  return String(v || '')
+    .replace(/[\\\\/?*\\[\\]:]/g, '')
+    .trim()
+    .replace(/\\s+/g, '_')
+    .slice(0, 70);
+}
+
+function ensureSheet(ss, name) {
+  var sh = ss.getSheetByName(name);
+  if (!sh) sh = ss.insertSheet(name);
+  return sh;
+}
+
+function relinkDashboardToMaster(dashboardSheet, masterName) {
+  var range = dashboardSheet.getDataRange();
+  var formulas = range.getFormulas();
+  var changed = false;
+
+  for (var r = 0; r < formulas.length; r++) {
+    for (var c = 0; c < formulas[r].length; c++) {
+      var f = formulas[r][c];
+      if (!f) continue;
+      var next = f
+        .replace(/Gift_KPI_MASTER/g, masterName)
+        .replace(/[A-Za-z0-9_]+_KPI_MASTER/g, masterName);
+      if (next !== f) {
+        formulas[r][c] = next;
+        changed = true;
+      }
+    }
+  }
+
+  if (changed) range.setFormulas(formulas);
+}
+
+function ensureDashboard(ss, dashboardName, masterName) {
+  var sh = ss.getSheetByName(dashboardName);
+  if (sh) {
+    relinkDashboardToMaster(sh, masterName);
+    return sh;
+  }
+
+  var template = ss.getSheetByName('Gift_Dashboard');
+  if (template) {
+    sh = template.copyTo(ss).setName(dashboardName);
+    relinkDashboardToMaster(sh, masterName);
+    return sh;
+  }
+
+  sh = ss.insertSheet(dashboardName);
+  sh.getRange('A1').setValue('Dashboard template not found: Gift_Dashboard');
+  return sh;
+}
+
+function doPost(e) {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var d = JSON.parse((e && e.postData && e.postData.contents) || '{}');
+
+  var nick = cleanName(d.nickname || d.name || ('user_' + String(d.uid || '').slice(0, 6))) || 'User';
+  var ownerKey = cleanName(d.ownerKey || (nick + '_' + String(d.uid || '').slice(0, 6))) || nick;
+  var masterName = cleanName(d.masterSheetName || (ownerKey + '_KPI_MASTER'));
+  var dashboardName = cleanName(d.dashboardSheetName || (ownerKey + '_Dashboard'));
+
+  var master = ensureSheet(ss, masterName);
+  ensureDashboard(ss, dashboardName, masterName);
+
+  if (master.getLastRow() === 0) {
+    master.appendRow(['Date','Name','Nickname','Email','UID','Group','Task ID','Task Name','Qty','Unit','Credits','Notes','Canva','Drive','Timestamp']);
+  }
+
+  master.appendRow([
+    d.date, d.name, nick, d.email, d.uid, d.group, d.taskId, d.taskName,
+    d.quantity, d.unit, d.credits, d.notes, d.canvaLink, d.driveLink, d.timestamp
+  ]);
+
+  return ContentService
+    .createTextOutput(JSON.stringify({ ok: true, ownerKey: ownerKey, masterName: masterName, dashboardName: dashboardName }))
+    .setMimeType(ContentService.MimeType.JSON);
+}
+`;
 
 // ─── MODAL ───────────────────────────────────────────────────────────────────
 const Modal = ({
@@ -894,22 +979,21 @@ export default function App() {
   useEffect(() => {
     if (!currentUser) return;
     const uid = currentUser.uid;
-    const readSetting = (key: string, legacyKey: string, fallback = '') =>
-      localStorage.getItem(scopedKey(uid, key)) ??
-      localStorage.getItem(legacyKey) ??
-      fallback;
+    const readSetting = (key: string, fallback = '') =>
+      localStorage.getItem(scopedKey(uid, key)) ?? fallback;
 
-    setSheetUrl(readSetting('sheet_url', 'jartrack_sheet_url', defaultSheetUrl));
-    setSheetsWebhookUrl(readSetting('sheets_webhook', 'jartrack_sheets_webhook', ''));
-    setCalY8Url(readSetting('cal_y8', 'jartrack_cal_y8', ''));
-    setCalPvUrl(readSetting('cal_pv', 'jartrack_cal_pv', ''));
-    setDriveFolderId(readSetting('drive_folder_id', 'jartrack_drive_folder_id', ''));
+    setSheetUrl(readSetting('sheet_url', defaultSheetUrl));
+    setSheetsWebhookUrl(readSetting('sheets_webhook', ''));
+    setCalY8Url(readSetting('cal_y8', ''));
+    setCalPvUrl(readSetting('cal_pv', ''));
+    setDriveFolderId(readSetting('drive_folder_id', ''));
   }, [currentUser]);
 
   // ── localStorage offline cache
   useEffect(() => {
-    localStorage.setItem('jartrack_entries_v8', JSON.stringify(entries));
-  }, [entries]);
+    if (!currentUser) return;
+    localStorage.setItem(scopedKey(currentUser.uid, 'entries_v8'), JSON.stringify(entries));
+  }, [entries, currentUser]);
 
   const showToast = (message: string) => {
     setToast({ show: true, message });
@@ -1138,7 +1222,7 @@ export default function App() {
       },
       (error) => {
         console.error('Firestore:', error);
-        const saved = localStorage.getItem('jartrack_entries_v8');
+        const saved = localStorage.getItem(scopedKey(currentUser.uid, 'entries_v8'));
         if (saved) try { setEntries(JSON.parse(saved)); } catch { /* ignore */ }
         setIsLoading(false);
         showToast('⚠️ ใช้ข้อมูล offline');
