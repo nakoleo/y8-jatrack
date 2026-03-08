@@ -23,7 +23,7 @@ import { ROLE_DEFAULTS, ROLE_EMOJI } from './roleDefaults';
 // ─── HELPERS ─────────────────────────────────────────────────────────────────
 const HOST_EMAIL = 'host.y8@gmail.com';
 const SUPER_ADMIN_EMAIL = 'info.nakoleo@gmail.com';
-const KPI_POLICY_VERSION = 2;
+const KPI_POLICY_VERSION = 3;
 
 const ZERO_STARTER_GROUPS: WorkGroups = {
   A: {
@@ -212,6 +212,14 @@ function ensureDashboard(ss, dashboardName, masterName) {
   return sh;
 }
 
+function keepPairTogether(ss, masterSheet, dashboardSheet) {
+  var masterIndex = masterSheet.getIndex();
+  var dashboardIndex = dashboardSheet.getIndex();
+  if (dashboardIndex === masterIndex + 1) return;
+  ss.setActiveSheet(dashboardSheet);
+  ss.moveActiveSheet(masterIndex + 1);
+}
+
 function doPost(e) {
   var ss = SpreadsheetApp.getActiveSpreadsheet();
   var d = JSON.parse((e && e.postData && e.postData.contents) || '{}');
@@ -222,7 +230,8 @@ function doPost(e) {
   var dashboardName = cleanName(d.dashboardSheetName || (ownerKey + '_Dashboard'));
 
   var master = ensureSheet(ss, masterName);
-  ensureDashboard(ss, dashboardName, masterName);
+  var dashboard = ensureDashboard(ss, dashboardName, masterName);
+  keepPairTogether(ss, master, dashboard);
 
   if (master.getLastRow() === 0) {
     master.appendRow(['Date','Name','Nickname','Email','UID','Group','Task ID','Task Name','Qty','Unit','Credits','Notes','Canva','Drive','Timestamp']);
@@ -1112,15 +1121,16 @@ export default function App() {
           if (mustResetToPolicy) {
             setKpiConfig(initial.groups);
             setMonthlyTarget(initial.monthlyTarget);
-            await setDoc(doc(db, 'kpiConfigs', currentUser.uid), {
-              uid: currentUser.uid,
-              roleId: initial.roleId,
-              label: initial.label,
-              groups: initial.groups,
-              monthlyTarget: initial.monthlyTarget,
-              policyVersion: KPI_POLICY_VERSION,
-              updatedAt: Date.now(),
-            }, { merge: true });
+              await setDoc(doc(db, 'kpiConfigs', currentUser.uid), {
+                uid: currentUser.uid,
+                roleId: initial.roleId,
+                label: initial.label,
+                groups: initial.groups,
+                monthlyTarget: initial.monthlyTarget,
+                policyVersion: KPI_POLICY_VERSION,
+                seededAt: Date.now(),
+                updatedAt: Date.now(),
+              }, { merge: true });
           } else {
             setKpiConfig(data.groups as WorkGroups);
             setMonthlyTarget(Math.max(0, Number(data.monthlyTarget || 0)));
@@ -1135,6 +1145,7 @@ export default function App() {
             groups: initial.groups,
             monthlyTarget: initial.monthlyTarget,
             policyVersion: KPI_POLICY_VERSION,
+            seededAt: Date.now(),
             updatedAt: Date.now(),
           }, { merge: true });
         }
@@ -1362,31 +1373,42 @@ export default function App() {
     const accessToken = await ensureDriveAccessToken();
     if (!accessToken) return null;
 
+    const buildForm = (metadata: Record<string, unknown>) => {
+      const form = new FormData();
+      form.append('metadata', new Blob([JSON.stringify(metadata)], { type: 'application/json' }));
+      form.append('file', file);
+      return form;
+    };
+
     const metadata: Record<string, unknown> = {
       name: file.name,
     };
     if (driveFolderId.trim()) metadata.parents = [driveFolderId.trim()];
 
-    const form = new FormData();
-    form.append('metadata', new Blob([JSON.stringify(metadata)], { type: 'application/json' }));
-    form.append('file', file);
-
-    const uploadRes = await fetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,webViewLink', {
+    const uploadRequest = (body: FormData) => fetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,webViewLink', {
       method: 'POST',
       headers: { Authorization: `Bearer ${accessToken}` },
-      body: form,
+      body,
     });
+
+    let uploadRes = await uploadRequest(buildForm(metadata));
 
     if (!uploadRes.ok) {
       const errText = await uploadRes.text().catch(() => '');
       console.error('Drive upload:', errText);
-      if (uploadRes.status === 404 && driveFolderId.trim()) {
-        throw new Error('drive_folder_not_found');
+      if ((uploadRes.status === 404 || uploadRes.status === 400) && driveFolderId.trim()) {
+        const fallbackRes = await uploadRequest(buildForm({ name: file.name }));
+        if (fallbackRes.ok) {
+          uploadRes = fallbackRes;
+          showToast('โฟลเดอร์ไม่ถูกต้อง: บันทึกไฟล์ไว้ที่ My Drive แทน');
+        } else {
+          throw new Error('drive_folder_not_found');
+        }
       }
       if (uploadRes.status === 403) {
         throw new Error('drive_forbidden');
       }
-      throw new Error('drive_upload_failed');
+      if (!uploadRes.ok) throw new Error('drive_upload_failed');
     }
 
     const uploaded = await uploadRes.json() as { id?: string; webViewLink?: string };
@@ -1478,11 +1500,15 @@ export default function App() {
 
   // ── Sheets Auto-Push (fire-and-forget, no-cors)
   const pushToSheetsWebhook = (entry: WorkEntry) => {
-    if (!sheetsWebhookUrl) return;
+    if (!sheetsWebhookUrl) {
+      showToast('ยังไม่ได้ตั้งค่า Sheets Webhook ใน Settings');
+      return;
+    }
     const task = kpiConfig[entry.groupId]?.tasks.find(t => t.id === entry.taskId);
     const nickname = (userProfile?.nickname || displayName).trim();
     const sheets = buildSheetNames(nickname, currentUser?.uid);
     const payload: Record<string, unknown> = {
+      // New payload
       date:      entry.date,
       name:      entry.userName || displayName,
       group:     kpiConfig[entry.groupId]?.name || entry.groupId,
@@ -1501,6 +1527,11 @@ export default function App() {
       masterSheetName: sheets.masterSheetName,
       dashboardSheetName: sheets.dashboardSheetName,
       timestamp: new Date().toISOString(),
+      // Backward-compatible payload (for legacy Apps Script)
+      id: entry.id,
+      user: entry.userName || displayName,
+      groupName: kpiConfig[entry.groupId]?.name || entry.groupId,
+      channel: task?.channel || '',
     };
 
     if (!isOnline) {

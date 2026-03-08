@@ -17,6 +17,7 @@ KPI tracking app for Y8/PV teams (mobile-first, Firebase + Google integrations).
 - Google Drive direct upload (`drive.file` scope) with optional default folder ID
 - Google Sheets auto-push via Apps Script webhook
   - Auto creates per-user sheet names: `<nickname>_<uid6>_KPI_MASTER` and `<nickname>_<uid6>_Dashboard`
+  - Keeps each user's 2 sheets adjacent for easier order (1-2, 3-4, 5-6, ...)
 - Google Calendar iCal feed viewer (Y8 + PV)
 - Export reports (TXT / CSV / Space Sheet CSV) by month + year
 
@@ -71,6 +72,7 @@ Production URLs:
   - Google Drive folder ID (optional)
   - Calendar iCal URLs
 - Apps Script template can be copied directly from Settings.
+- If webhook is empty, app will still save to Firestore but will warn and skip writing to Google Sheets.
 - If Google Drive upload fails:
   - Reconnect Google Drive from Settings (consent popup)
   - Verify Google Drive API is enabled in Google Cloud project
