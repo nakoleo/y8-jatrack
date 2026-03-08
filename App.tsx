@@ -17,7 +17,7 @@ import {
 } from 'firebase/auth';
 import { db, auth, googleProvider, createDriveProvider, firebaseApp } from './firebase';
 import { WORK_GROUPS } from './constants';
-import { WorkEntry, WorkGroups, TabType, UserProfile, RoleId } from './types';
+import { WorkEntry, WorkGroup, WorkGroups, TabType, UserProfile, RoleId } from './types';
 import { ROLE_DEFAULTS, ROLE_EMOJI } from './roleDefaults';
 
 // ─── HELPERS ─────────────────────────────────────────────────────────────────
@@ -299,7 +299,7 @@ const Toast = ({ message, show }: { message: string; show: boolean }) => {
 const GroupBar = ({
   groupKey, name, credits, maxCredits, color, bg,
 }: {
-  groupKey: string; name: string; credits: number; maxCredits: number; color: string; bg: string;
+  key?: React.Key; groupKey: string; name: string; credits: number; maxCredits: number; color: string; bg: string;
 }) => {
   const pct = maxCredits > 0 ? (credits / maxCredits) * 100 : 0;
   return (
@@ -332,6 +332,7 @@ const GroupBar = ({
 function EntryCard({
   entry, workGroups, onEdit, onDelete,
 }: {
+  key?: React.Key;
   entry: WorkEntry;
   workGroups: WorkGroups;
   onEdit: (e: WorkEntry) => void;
@@ -539,7 +540,7 @@ function KpiEditor({
     }
   };
 
-  const groups = Object.entries(draft);
+  const groups = Object.entries(draft) as [string, WorkGroup][];
 
   return (
     <div className="fixed inset-0 z-[150] bg-[#FDFAF7] flex flex-col max-w-md mx-auto left-0 right-0">
@@ -1613,7 +1614,7 @@ export default function App() {
   // ── Derived state
   const currentTask = useMemo(() => {
     const group = kpiConfig[selectedGroup];
-    if (!group) return Object.values(kpiConfig)[0]?.tasks[0];
+    if (!group) return (Object.values(kpiConfig) as WorkGroup[])[0]?.tasks[0];
     return group.tasks.find((t) => t.id === selectedTaskId) || group.tasks[0];
   }, [kpiConfig, selectedGroup, selectedTaskId]);
 
@@ -1710,7 +1711,7 @@ export default function App() {
 
   const adminSummary = useMemo(() => {
     const now = new Date();
-    const profileByUid = new Map(adminProfiles.map((p) => [p.uid, p]));
+    const profileByUid = new Map<string, UserProfile>(adminProfiles.map((p) => [p.uid, p]));
     const monthEntries = adminEntries.filter((e) => {
       try {
         const d = new Date(e.date);
@@ -1851,7 +1852,7 @@ export default function App() {
     content += `  Export : ${new Date().toLocaleString('th-TH')}\n\n`;
 
     // Group by group
-    const groupKeys = [...new Set(filtered.map(e => e.groupId))];
+    const groupKeys = [...new Set(filtered.map(e => e.groupId))] as string[];
     groupKeys.forEach(gKey => {
       const group     = kpiConfig[gKey];
       const groupRows = filtered.filter(e => e.groupId === gKey);
@@ -1938,7 +1939,7 @@ export default function App() {
     rows.push(''); // blank row
 
     // ── DETAIL SECTION — per group
-    const groupKeys = [...new Set(filtered.map(e => e.groupId))];
+    const groupKeys = [...new Set(filtered.map(e => e.groupId))] as string[];
     groupKeys.forEach(gKey => {
       const group     = kpiConfig[gKey];
       const groupRows = filtered.filter(e => e.groupId === gKey);
@@ -2009,7 +2010,7 @@ export default function App() {
 
   const todayEntries   = entries.filter((e) => e.user === currentUser.uid && e.date === getTodayStr());
   const historyEntries = entries.filter((e) => e.user === currentUser.uid);
-  const historyDates   = Array.from(new Set(historyEntries.map((e) => e.date))).sort((a, b) => b.localeCompare(a));
+  const historyDates   = Array.from<string>(new Set(historyEntries.map((e) => e.date))).sort((a, b) => b.localeCompare(a));
 
   // ─── MAIN APP ───────────────────────────────────────────────────────────────
   return (
