@@ -82,35 +82,76 @@ Key ref:
   - `https://jartrack-y8pv.web.app`
   - `https://jartrack-y8pv.firebaseapp.com`
 
-## 4) Current user-reported issues after changes
-- Google Drive upload still failing in real usage.
-- Some created sheets are empty (no header/no rows written).
-- KPI must not mirror Gift across users.
-- Wants guaranteed orderly sheet-pair placement.
+## 4) Latest status (important update)
+- Google Drive upload is now working in real usage.
+- Root cause was a combination of:
+  - Google Cloud OAuth config not yet completed in the correct project (`jartrack-y8pv`)
+  - Firebase Google provider needing final project-level setup/save
+  - old OAuth permissions / incomplete test-user setup during testing
+- User has now completed the required Google Cloud + Firebase console setup and confirmed upload success.
+- The app-side "Drive Preflight" checks were useful and should be kept unless Claude has a better replacement.
+- Earlier Apps Script issue ("header row/table validation" caused by bulk formula updates) was addressed by changing the template logic to update formulas cell-by-cell instead of bulk `setFormulas(...)`.
 
-## 5) Likely causes to verify next
-1. Apps Script deployed version might not match latest template code.
-2. Web app deployment access/execute settings may block write path.
-3. App user settings may still contain old or wrong webhook URL.
-4. Drive API / consent / folder permission for active Google account may still block upload.
+## 5) Operational guidance / what other users should need
+- The Google Cloud / OAuth / Firebase Auth setup is intended to be admin-only, one-time project setup.
+- Other users should NOT need to configure Google Cloud or Firebase console settings themselves.
+- Expected user-level setup should be limited to app usage only, ideally:
+  - sign in with Google
+  - have nickname/profile available
+  - optionally attach files/links in normal UI flow
+- If any remaining per-user manual config still exists in the app and is not business-required, Claude should consider simplifying or removing it.
 
-## 6) Immediate professional checklist for Claude
-1. Verify actual deployed GAS code/version (not only editor buffer).
-2. Verify deployment settings:
-   - Execute as: script owner
-   - Access: per organization policy (typically anyone with link for this flow)
-3. Perform real POST test against `/exec` URL with current payload fields.
-4. In app, for one test user:
-   - save nickname + webhook
-   - add 1 entry
-   - confirm pair sheets created with headers + appended row
-5. Test Drive upload with:
-   - valid folder ID
-   - invalid folder ID (should fallback to My Drive)
+## 6) Remaining product request for Claude (next implementation target)
+User wants the next phase to focus on attachment workflow quality and operational polish:
 
-## 7) Apps Script identifiers shared by user
+1. Multi-file upload in one action
+- Allow selecting multiple files at once from the app.
+- Upload all selected files to Google Drive in one flow.
+- Preserve reliable linking back to the work entry.
+
+2. Automatic standardized file renaming
+- Add an app-side rename/normalization function before upload.
+- Goal: consistent naming by work type/category + date (`ddmmyyyy`) + systematic structure.
+- The naming scheme should help storage discipline and later retrieval.
+- Claude should define the exact naming format explicitly and keep it deterministic.
+
+3. Strong file-to-work-entry referencing
+- Each uploaded file should be traceable from the work item.
+- App should store accurate file name(s) plus Drive link(s), not just a loose single URL if multiple files are uploaded.
+- Claude should review whether current data model (`canvaLink`, `driveLink`) needs to evolve into a richer attachment structure.
+
+4. Better organization in Google Drive
+- User wants uploads saved in a cleaner, more systematic way by task type/date.
+- Claude should decide whether this should be:
+  - filename-only normalization, or
+  - folder hierarchy + standardized filename, or
+  - both
+- Recommendation from current context: likely both, but Claude should validate against actual app constraints and user workflow.
+
+5. End-to-end cleanliness review
+- User explicitly asked for a general readiness review of the whole app after the Drive milestone.
+- Claude should review:
+  - auth/login flow
+  - Drive upload flow
+  - Google Sheets write flow
+  - KPI defaults / isolation
+  - UX friction for non-admin users
+  - any remaining manual configuration burden
+
+## 7) Suggested implementation considerations for Claude
+- Review whether `WorkEntry` should support an attachments array, e.g. multiple Drive files with:
+  - original name
+  - normalized name
+  - file id
+  - link
+  - mime type
+- Review whether edit/history/export/admin views need updates for multi-file support.
+- Keep backward compatibility with existing entries that only have single `driveLink`.
+- If filename normalization is added, surface it clearly in UI so users understand what the saved filename will become.
+- Prefer reducing user setup burden rather than adding new required settings.
+
+## 8) Apps Script identifiers shared by user
 - Deployment ID:
   - `AKfycbyiyRg2eM0X75mmujisnHJ_qhDclpJ4Ba-21L-h9wuKfXvQ-qZ7yF64lbOWeKAuNcxu`
 - Web app URL:
   - `https://script.google.com/macros/s/AKfycbyiyRg2eM0X75mmujisnHJ_qhDclpJ4Ba-21L-h9wuKfXvQ-qZ7yF64lbOWeKAuNcxu/exec`
-
