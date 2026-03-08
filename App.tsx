@@ -1,11 +1,11 @@
 
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import {
   PlusCircle, History, BarChart3, Calendar as CalendarIcon,
   Trash2, CheckCircle2, Plus, Minus, Clock, Edit3, X, Settings,
   ChevronDown, FileText, Sparkles, Download, RefreshCw,
   LogOut, ChevronLeft, ChevronRight, TrendingUp, Wifi, WifiOff,
-  Save, Sliders, UserCircle,
+  Save, Sliders, UserCircle, Upload, ExternalLink,
 } from 'lucide-react';
 import {
   collection, collectionGroup, doc, setDoc, deleteDoc,
@@ -13,6 +13,7 @@ import {
 } from 'firebase/firestore';
 import {
   signInWithPopup, signOut, onAuthStateChanged, type User,
+  reauthenticateWithPopup, GoogleAuthProvider,
 } from 'firebase/auth';
 import { db, auth, googleProvider } from './firebase';
 import { WORK_GROUPS } from './constants';
@@ -97,6 +98,8 @@ const getInitialKpiForEmail = (email?: string | null) => {
     label: 'Custom',
   };
 };
+
+const scopedKey = (uid: string, key: string) => `jartrack_${uid}_${key}`;
 
 const formatThaiDate = (dateStr: string, full = false) => {
   if (!dateStr) return '';
@@ -603,7 +606,7 @@ function KpiEditor({
                           type="number"
                           value={task.creditPerUnit}
                           onChange={e => updateTask(key, task.id, 'creditPerUnit', e.target.value)}
-                          min="0.5" step="0.5"
+                          min="0" step="0.1"
                           className="w-full px-2 py-2 bg-white border border-orange-200 rounded-xl text-[14px] font-bold text-[#F4823C] outline-none text-center"
                         />
                       </div>
@@ -833,9 +836,7 @@ export default function App() {
   const [isOnline, setIsOnline]             = useState(navigator.onLine);
 
   const defaultSheetUrl = 'https://docs.google.com/spreadsheets/d/1229iCUcIAnkSKHOq2g3p36_NuzBuWzJma3DpDLIzJRo/edit?usp=sharing';
-  const [sheetUrl, setSheetUrl]             = useState<string>(
-    localStorage.getItem('jartrack_sheet_url') || defaultSheetUrl
-  );
+  const [sheetUrl, setSheetUrl]             = useState<string>(defaultSheetUrl);
 
   const [selectedDate, setSelectedDate]     = useState(getTodayStr());
   const [selectedGroup, setSelectedGroup]   = useState<string>('A');
@@ -850,6 +851,7 @@ export default function App() {
   const [showExportModal, setShowExportModal] = useState(false);
   const [showSettings, setShowSettings]     = useState(false);
   const [exportMonth, setExportMonth]       = useState(new Date().getMonth());
+  const [exportYear, setExportYear]         = useState(new Date().getFullYear());
   const [summaryMonth, setSummaryMonth]     = useState(new Date().getMonth());
   const [summaryYear, setSummaryYear]       = useState(new Date().getFullYear());
   const [adminProfiles, setAdminProfiles]   = useState<UserProfile[]>([]);
@@ -858,15 +860,22 @@ export default function App() {
   const [adminLoading, setAdminLoading]     = useState(false);
 
   // ── Integration states
-  const [sheetsWebhookUrl, setSheetsWebhookUrl] = useState(localStorage.getItem('jartrack_sheets_webhook') || '');
-  const [calY8Url, setCalY8Url]               = useState(localStorage.getItem('jartrack_cal_y8') || '');
-  const [calPvUrl, setCalPvUrl]               = useState(localStorage.getItem('jartrack_cal_pv') || '');
+  const [sheetsWebhookUrl, setSheetsWebhookUrl] = useState('');
+  const [calY8Url, setCalY8Url]               = useState('');
+  const [calPvUrl, setCalPvUrl]               = useState('');
+  const [driveFolderId, setDriveFolderId]     = useState('');
   const [calEvents, setCalEvents]             = useState<CalEvent[]>([]);
   const [calLoading, setCalLoading]           = useState(false);
   const [showCalSection, setShowCalSection]   = useState(true);
+  const [driveUploading, setDriveUploading]   = useState(false);
+  const [driveUploadingEdit, setDriveUploadingEdit] = useState(false);
+  const [googleAccessToken, setGoogleAccessToken] = useState('');
+  const [googleAccessTokenExpiry, setGoogleAccessTokenExpiry] = useState(0);
   // Entry link fields (LOG form)
   const [canvaLink, setCanvaLink]             = useState('');
   const [driveLink, setDriveLink]             = useState('');
+  const logDriveInputRef = useRef<HTMLInputElement | null>(null);
+  const editDriveInputRef = useRef<HTMLInputElement | null>(null);
   const isSuperAdmin = isSuperAdminEmail(currentUser?.email);
 
   // ── Offline detection
@@ -881,6 +890,22 @@ export default function App() {
     };
   }, []);
 
+  // ── Load per-user integration settings
+  useEffect(() => {
+    if (!currentUser) return;
+    const uid = currentUser.uid;
+    const readSetting = (key: string, legacyKey: string, fallback = '') =>
+      localStorage.getItem(scopedKey(uid, key)) ??
+      localStorage.getItem(legacyKey) ??
+      fallback;
+
+    setSheetUrl(readSetting('sheet_url', 'jartrack_sheet_url', defaultSheetUrl));
+    setSheetsWebhookUrl(readSetting('sheets_webhook', 'jartrack_sheets_webhook', ''));
+    setCalY8Url(readSetting('cal_y8', 'jartrack_cal_y8', ''));
+    setCalPvUrl(readSetting('cal_pv', 'jartrack_cal_pv', ''));
+    setDriveFolderId(readSetting('drive_folder_id', 'jartrack_drive_folder_id', ''));
+  }, [currentUser]);
+
   // ── localStorage offline cache
   useEffect(() => {
     localStorage.setItem('jartrack_entries_v8', JSON.stringify(entries));
@@ -889,6 +914,25 @@ export default function App() {
   const showToast = (message: string) => {
     setToast({ show: true, message });
     setTimeout(() => setToast({ show: false, message: '' }), 2500);
+  };
+
+  const getWebhookQueue = (): Record<string, unknown>[] => {
+    if (!currentUser) return [];
+    const raw = localStorage.getItem(scopedKey(currentUser.uid, 'webhook_queue'));
+    if (!raw) return [];
+    try { return JSON.parse(raw) as Record<string, unknown>[]; }
+    catch { return []; }
+  };
+
+  const setWebhookQueue = (rows: Record<string, unknown>[]) => {
+    if (!currentUser) return;
+    localStorage.setItem(scopedKey(currentUser.uid, 'webhook_queue'), JSON.stringify(rows));
+  };
+
+  const enqueueWebhook = (payload: Record<string, unknown>) => {
+    const queue = getWebhookQueue();
+    queue.push(payload);
+    setWebhookQueue(queue.slice(-200));
   };
 
   // ── Firebase Auth listener (Phase 3)
@@ -1158,7 +1202,13 @@ export default function App() {
   const handleSignIn = async () => {
     setSignInLoading(true);
     try {
-      await signInWithPopup(auth, googleProvider);
+      const result = await signInWithPopup(auth, googleProvider);
+      const credential = GoogleAuthProvider.credentialFromResult(result);
+      const accessToken = credential?.accessToken;
+      if (accessToken) {
+        setGoogleAccessToken(accessToken);
+        setGoogleAccessTokenExpiry(Date.now() + 50 * 60 * 1000);
+      }
     } catch (e) {
       console.error(e);
       showToast('❌ เข้าสู่ระบบไม่สำเร็จ');
@@ -1171,7 +1221,102 @@ export default function App() {
     await signOut(auth);
     setEntries([]);
     setShowSettings(false);
+    setGoogleAccessToken('');
+    setGoogleAccessTokenExpiry(0);
     showToast('ออกจากระบบแล้ว');
+  };
+
+  const ensureDriveAccessToken = async (): Promise<string | null> => {
+    if (googleAccessToken && Date.now() < googleAccessTokenExpiry - 60_000) {
+      return googleAccessToken;
+    }
+    if (!currentUser) return null;
+    try {
+      const result = await reauthenticateWithPopup(currentUser, googleProvider);
+      const credential = GoogleAuthProvider.credentialFromResult(result);
+      const accessToken = credential?.accessToken || '';
+      if (accessToken) {
+        setGoogleAccessToken(accessToken);
+        setGoogleAccessTokenExpiry(Date.now() + 50 * 60 * 1000);
+        return accessToken;
+      }
+      return null;
+    } catch (error) {
+      console.error('Drive auth:', error);
+      showToast('❌ ต้องอนุญาต Google Drive ก่อนอัปโหลดไฟล์');
+      return null;
+    }
+  };
+
+  const uploadFileToGoogleDrive = async (file: File): Promise<string | null> => {
+    const accessToken = await ensureDriveAccessToken();
+    if (!accessToken) return null;
+
+    const metadata: Record<string, unknown> = {
+      name: file.name,
+    };
+    if (driveFolderId.trim()) metadata.parents = [driveFolderId.trim()];
+
+    const form = new FormData();
+    form.append('metadata', new Blob([JSON.stringify(metadata)], { type: 'application/json' }));
+    form.append('file', file);
+
+    const uploadRes = await fetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,webViewLink', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${accessToken}` },
+      body: form,
+    });
+
+    if (!uploadRes.ok) {
+      const errText = await uploadRes.text().catch(() => '');
+      console.error('Drive upload:', errText);
+      throw new Error('drive_upload_failed');
+    }
+
+    const uploaded = await uploadRes.json() as { id?: string; webViewLink?: string };
+    if (!uploaded.id) return null;
+
+    // Ensure the file can be opened by link.
+    await fetch(`https://www.googleapis.com/drive/v3/files/${uploaded.id}/permissions`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ role: 'reader', type: 'anyone' }),
+    }).catch(() => {});
+
+    const fileRes = await fetch(`https://www.googleapis.com/drive/v3/files/${uploaded.id}?fields=webViewLink,webContentLink`, {
+      headers: { Authorization: `Bearer ${accessToken}` },
+    });
+    if (!fileRes.ok) return uploaded.webViewLink || `https://drive.google.com/file/d/${uploaded.id}/view`;
+
+    const fileData = await fileRes.json() as { webViewLink?: string; webContentLink?: string };
+    return fileData.webViewLink || fileData.webContentLink || `https://drive.google.com/file/d/${uploaded.id}/view`;
+  };
+
+  const handleConnectGoogleDrive = async () => {
+    const token = await ensureDriveAccessToken();
+    if (token) showToast('เชื่อม Google Drive แล้ว ✓');
+  };
+
+  const handleDriveFileSelected = async (file: File, mode: 'log' | 'edit') => {
+    if (!file) return;
+    if (mode === 'log') setDriveUploading(true);
+    else setDriveUploadingEdit(true);
+    try {
+      const link = await uploadFileToGoogleDrive(file);
+      if (!link) throw new Error('drive_link_missing');
+      if (mode === 'log') setDriveLink(link);
+      else setEditEntry(prev => (prev ? { ...prev, driveLink: link } : prev));
+      showToast(`อัปโหลดไฟล์แล้ว: ${file.name}`);
+    } catch (error) {
+      console.error('Drive upload error:', error);
+      showToast('❌ อัปโหลด Google Drive ไม่สำเร็จ');
+    } finally {
+      if (mode === 'log') setDriveUploading(false);
+      else setDriveUploadingEdit(false);
+    }
   };
 
   const handleSaveNickname = async (nextNickname: string): Promise<boolean> => {
@@ -1214,31 +1359,68 @@ export default function App() {
     const task = kpiConfig[entry.groupId]?.tasks.find(t => t.id === entry.taskId);
     const nickname = (userProfile?.nickname || displayName).trim();
     const sheets = buildSheetNames(nickname, currentUser?.uid);
+    const payload: Record<string, unknown> = {
+      date:      entry.date,
+      name:      entry.userName || displayName,
+      group:     kpiConfig[entry.groupId]?.name || entry.groupId,
+      taskId:    entry.taskId,
+      taskName:  task?.name || '',
+      quantity:  entry.quantity,
+      unit:      task?.unit || '',
+      credits:   entry.credits,
+      notes:     entry.notes,
+      canvaLink: entry.canvaLink || '',
+      driveLink: entry.driveLink || '',
+      uid:       currentUser?.uid || '',
+      email:     normalizeEmail(currentUser?.email),
+      nickname,
+      masterSheetName: sheets.masterSheetName,
+      dashboardSheetName: sheets.dashboardSheetName,
+      timestamp: new Date().toISOString(),
+    };
+
+    if (!isOnline) {
+      enqueueWebhook(payload);
+      showToast('บันทึกแล้ว (คิวส่งชีตหลังออนไลน์)');
+      return;
+    }
+
     fetch(sheetsWebhookUrl, {
       method: 'POST',
       mode: 'no-cors',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        date:      entry.date,
-        name:      entry.userName || displayName,
-        group:     kpiConfig[entry.groupId]?.name || entry.groupId,
-        taskId:    entry.taskId,
-        taskName:  task?.name || '',
-        quantity:  entry.quantity,
-        unit:      task?.unit || '',
-        credits:   entry.credits,
-        notes:     entry.notes,
-        canvaLink: entry.canvaLink || '',
-        driveLink: entry.driveLink || '',
-        uid:       currentUser?.uid || '',
-        email:     normalizeEmail(currentUser?.email),
-        nickname,
-        masterSheetName: sheets.masterSheetName,
-        dashboardSheetName: sheets.dashboardSheetName,
-        timestamp: new Date().toISOString(),
-      }),
-    }).catch(() => {}); // never throw
+      body: JSON.stringify(payload),
+    }).catch(() => {
+      enqueueWebhook(payload);
+      showToast('บันทึกแล้ว (ส่งชีตไม่สำเร็จ, เข้า Queue)');
+    });
   };
+
+  useEffect(() => {
+    if (!currentUser || !sheetsWebhookUrl || !isOnline) return;
+    const queue = getWebhookQueue();
+    if (!queue.length) return;
+
+    const flush = async () => {
+      const remaining: Record<string, unknown>[] = [];
+      for (const payload of queue) {
+        try {
+          await fetch(sheetsWebhookUrl, {
+            method: 'POST',
+            mode: 'no-cors',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+          });
+        } catch {
+          remaining.push(payload);
+        }
+      }
+      setWebhookQueue(remaining);
+      if (remaining.length === 0) showToast('ส่งข้อมูลค้างไปชีตเรียบร้อย ✓');
+    };
+
+    void flush();
+  }, [currentUser, sheetsWebhookUrl, isOnline]);
 
   // ── Derived state
   const currentTask = useMemo(() => {
@@ -1252,6 +1434,15 @@ export default function App() {
     currentUser?.displayName ||
     currentUser?.email?.split('@')[0] ||
     'User';
+
+  const exportYearOptions = useMemo(() => {
+    const years = new Set<number>([new Date().getFullYear()]);
+    entries.forEach((entry) => {
+      const year = new Date(entry.date).getFullYear();
+      if (!Number.isNaN(year)) years.add(year);
+    });
+    return Array.from(years).sort((a, b) => b - a);
+  }, [entries]);
 
   // ── Header stats — always current month
   const stats = useMemo(() => {
@@ -1436,20 +1627,25 @@ export default function App() {
   };
 
   // ── Export
-  const buildExportRows = (month: number) => {
+  const buildExportRows = (month: number, year: number) => {
     return entries
       .filter((e) => e.user === currentUser?.uid)
       .filter((e) => {
-        try { return new Date(e.date).getMonth() === month; } catch { return false; }
+        try {
+          const date = new Date(e.date);
+          return date.getMonth() === month && date.getFullYear() === year;
+        } catch {
+          return false;
+        }
       })
       .sort((a, b) => a.date.localeCompare(b.date));
   };
 
   const handleExportTxt = () => {
-    const filtered = buildExportRows(exportMonth);
+    const filtered = buildExportRows(exportMonth, exportYear);
     if (filtered.length === 0) { showToast('ไม่มีข้อมูลในเดือนที่เลือก'); return; }
     const monthName    = getMonthNameThai(exportMonth);
-    const yr           = exportMonth <= new Date().getMonth() ? new Date().getFullYear() : new Date().getFullYear() - 1;
+    const yr           = exportYear;
     const totalCredits = filtered.reduce((s, e) => s + e.credits, 0);
     const role         = userProfile ? (ROLE_DEFAULTS[userProfile.role]?.meta.label || userProfile.role) : '';
     let content = `╔══════════════════════════════════════════════════╗\n`;
@@ -1492,10 +1688,10 @@ export default function App() {
   };
 
   const handleExportCsv = () => {
-    const filtered = buildExportRows(exportMonth);
+    const filtered = buildExportRows(exportMonth, exportYear);
     if (filtered.length === 0) { showToast('ไม่มีข้อมูลในเดือนที่เลือก'); return; }
     const monthName = getMonthNameThai(exportMonth);
-    const yr        = new Date().getFullYear();
+    const yr        = exportYear;
     const headers = ['#', 'วันที่', 'กลุ่ม', 'Task ID', 'Task Name', 'จำนวน', 'หน่วย', 'Cr/Unit', 'Credits', 'หมายเหตุ', 'Canva Link', 'Drive Link'];
     const rows = filtered.map((e, idx) => {
       const group = kpiConfig[e.groupId];
@@ -1527,10 +1723,10 @@ export default function App() {
 
   // ── Space Sheet Export — professional Google Sheets format
   const handleExportSpaceSheet = () => {
-    const filtered = buildExportRows(exportMonth);
+    const filtered = buildExportRows(exportMonth, exportYear);
     if (filtered.length === 0) { showToast('ไม่มีข้อมูลในเดือนที่เลือก'); return; }
     const monthName    = getMonthNameThai(exportMonth);
-    const yr           = new Date().getFullYear();
+    const yr           = exportYear;
     const totalCredits = filtered.reduce((s, e) => s + e.credits, 0);
     const pct          = Math.round(safePercent(totalCredits, monthlyTarget));
     const role         = userProfile ? (ROLE_DEFAULTS[userProfile.role]?.meta.label || userProfile.role) : '';
@@ -1690,6 +1886,32 @@ export default function App() {
                 className="w-full pl-10 pr-4 py-3 bg-slate-50 border border-slate-100 rounded-2xl text-[13px] outline-none"
               />
             </div>
+            <input
+              ref={editDriveInputRef}
+              type="file"
+              className="hidden"
+              onChange={(e) => {
+                const file = e.target.files?.[0];
+                if (file) void handleDriveFileSelected(file, 'edit');
+                e.currentTarget.value = '';
+              }}
+            />
+            <div className="grid grid-cols-2 gap-2">
+              <button
+                onClick={() => editDriveInputRef.current?.click()}
+                disabled={driveUploadingEdit}
+                className={`py-3 bg-slate-50 border border-slate-200 rounded-2xl font-bold text-[11px] text-slate-500 flex items-center justify-center gap-1.5 active:bg-emerald-50 transition-colors ${driveUploadingEdit ? 'opacity-60' : ''}`}
+              >
+                {driveUploadingEdit ? <RefreshCw size={13} className="animate-spin" /> : <Upload size={13} />}
+                {driveUploadingEdit ? 'กำลังอัปโหลด...' : 'อัปโหลดเข้า Drive'}
+              </button>
+              <button
+                onClick={() => window.open('https://www.canva.com', '_blank')}
+                className="py-3 bg-slate-50 border border-slate-200 rounded-2xl font-bold text-[11px] text-slate-500 flex items-center justify-center gap-1.5 active:bg-purple-50 transition-colors"
+              >
+                <ExternalLink size={13} /> เปิด Canva
+              </button>
+            </div>
             <button
               onClick={handleUpdateEntry}
               className="w-full py-4 text-white rounded-2xl font-bold text-[13px] tracking-widest active:scale-95 transition-all glow-orange"
@@ -1741,6 +1963,20 @@ export default function App() {
             </div>
           </div>
 
+          {/* Year picker */}
+          <div className="space-y-1.5">
+            <p className="text-[9px] font-bold text-slate-400 uppercase tracking-widest">เลือกปี</p>
+            <select
+              value={exportYear}
+              onChange={(e) => setExportYear(Number(e.target.value))}
+              className="w-full px-4 py-3 bg-orange-50 border border-orange-100 rounded-2xl text-[12px] font-bold text-[#2C2A28] outline-none"
+            >
+              {exportYearOptions.map((year) => (
+                <option key={year} value={year}>{year}</option>
+              ))}
+            </select>
+          </div>
+
           {/* Export count preview */}
           <div className="flex items-center gap-2 px-4 py-3 bg-orange-50 rounded-2xl border border-orange-100">
             <div className="w-8 h-8 rounded-xl bg-[#F4823C] flex items-center justify-center text-white shrink-0">
@@ -1748,9 +1984,9 @@ export default function App() {
             </div>
             <div>
               <p className="text-[11px] font-bold text-[#2C2A28]">
-                {buildExportRows(exportMonth).length} รายการ · {buildExportRows(exportMonth).reduce((s,e)=>s+e.credits,0)} Cr.
+                {buildExportRows(exportMonth, exportYear).length} รายการ · {buildExportRows(exportMonth, exportYear).reduce((s,e)=>s+e.credits,0)} Cr.
               </p>
-              <p className="text-[9px] text-slate-400">{getMonthNameThai(exportMonth)} {new Date().getFullYear()}</p>
+              <p className="text-[9px] text-slate-400">{getMonthNameThai(exportMonth)} {exportYear}</p>
             </div>
           </div>
 
@@ -1870,6 +2106,37 @@ export default function App() {
             </button>
           </div>
 
+          {/* Google Drive Attachment */}
+          <div className="space-y-1.5">
+            <label className="text-[10px] font-bold text-slate-400 tracking-widest uppercase">
+              Google Drive Attachments
+            </label>
+            <button
+              onClick={handleConnectGoogleDrive}
+              className="w-full py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-[11px] font-bold text-slate-500 flex items-center justify-center gap-1.5 active:bg-emerald-50 transition-colors"
+            >
+              <Upload size={13} />
+              {googleAccessToken && Date.now() < googleAccessTokenExpiry
+                ? 'เชื่อม Google Drive แล้ว'
+                : 'เชื่อม Google Drive เพื่ออัปโหลดไฟล์'}
+            </button>
+            <input
+              type="text"
+              value={driveFolderId}
+              onChange={(e) => setDriveFolderId(e.target.value)}
+              className="w-full px-4 py-3.5 bg-slate-50 border border-slate-100 rounded-2xl text-[12px] outline-none"
+              placeholder="Drive Folder ID (ไม่บังคับ)"
+            />
+            {driveFolderId.trim() && (
+              <button
+                onClick={() => window.open(`https://drive.google.com/drive/folders/${driveFolderId.trim()}`, '_blank')}
+                className="w-full py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-[11px] font-bold text-slate-500 flex items-center justify-center gap-1.5 active:bg-emerald-50 transition-colors"
+              >
+                <ExternalLink size={13} /> เปิดโฟลเดอร์ Drive ที่ตั้งไว้
+              </button>
+            )}
+          </div>
+
           {/* Google Calendar iCal — Y8 */}
           <div className="space-y-1.5">
             <label className="text-[10px] font-bold tracking-widest uppercase" style={{ color: '#F4823C' }}>
@@ -1938,12 +2205,14 @@ export default function App() {
             </button>
             <button
               onClick={async () => {
+                if (!currentUser) return;
                 const ok = await handleSaveNickname(nicknameDraft);
                 if (!ok) return;
-                localStorage.setItem('jartrack_sheet_url', sheetUrl);
-                localStorage.setItem('jartrack_sheets_webhook', sheetsWebhookUrl);
-                localStorage.setItem('jartrack_cal_y8', calY8Url);
-                localStorage.setItem('jartrack_cal_pv', calPvUrl);
+                localStorage.setItem(scopedKey(currentUser.uid, 'sheet_url'), sheetUrl.trim());
+                localStorage.setItem(scopedKey(currentUser.uid, 'sheets_webhook'), sheetsWebhookUrl.trim());
+                localStorage.setItem(scopedKey(currentUser.uid, 'cal_y8'), calY8Url.trim());
+                localStorage.setItem(scopedKey(currentUser.uid, 'cal_pv'), calPvUrl.trim());
+                localStorage.setItem(scopedKey(currentUser.uid, 'drive_folder_id'), driveFolderId.trim());
                 setShowSettings(false);
                 showToast('บันทึก Config แล้ว');
               }}
@@ -2151,6 +2420,32 @@ export default function App() {
                       placeholder="Google Drive link..."
                       className="w-full pl-10 pr-4 py-2.5 bg-[#FDFAF7] border border-slate-200 rounded-xl text-[13px] outline-none text-[#2C2A28] placeholder:text-slate-300"
                     />
+                  </div>
+                  <input
+                    ref={logDriveInputRef}
+                    type="file"
+                    className="hidden"
+                    onChange={(e) => {
+                      const file = e.target.files?.[0];
+                      if (file) void handleDriveFileSelected(file, 'log');
+                      e.currentTarget.value = '';
+                    }}
+                  />
+                  <div className="grid grid-cols-2 gap-2">
+                    <button
+                      onClick={() => logDriveInputRef.current?.click()}
+                      disabled={driveUploading}
+                      className={`py-2.5 bg-[#FDFAF7] border border-slate-200 rounded-xl text-[11px] font-bold text-slate-500 flex items-center justify-center gap-1.5 active:bg-emerald-50 transition-colors ${driveUploading ? 'opacity-60' : ''}`}
+                    >
+                      {driveUploading ? <RefreshCw size={13} className="animate-spin" /> : <Upload size={13} />}
+                      {driveUploading ? 'กำลังอัปโหลด...' : 'อัปโหลดเข้า Drive'}
+                    </button>
+                    <button
+                      onClick={() => window.open('https://www.canva.com', '_blank')}
+                      className="py-2.5 bg-[#FDFAF7] border border-slate-200 rounded-xl text-[11px] font-bold text-slate-500 flex items-center justify-center gap-1.5 active:bg-purple-50 transition-colors"
+                    >
+                      <ExternalLink size={13} /> เปิด Canva
+                    </button>
                   </div>
                 </div>
 

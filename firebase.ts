@@ -18,3 +18,6 @@ export const db            = getFirestore(firebaseApp);   // Firestore Database
 export const auth          = getAuth(firebaseApp);        // Authentication
 export const storage       = getStorage(firebaseApp);     // Storage (file upload)
 export const googleProvider = new GoogleAuthProvider();   // Google Sign-in (future)
+
+// Extra scopes for Drive upload integration (limited to files created by this app).
+googleProvider.addScope('https://www.googleapis.com/auth/drive.file');
