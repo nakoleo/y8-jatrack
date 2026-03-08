@@ -188,7 +188,6 @@ function ensureSheet(ss, name) {
 function relinkDashboardToMaster(dashboardSheet, masterName) {
   var range = dashboardSheet.getDataRange();
   var formulas = range.getFormulas();
-  var changed = false;
 
   for (var r = 0; r < formulas.length; r++) {
     for (var c = 0; c < formulas[r].length; c++) {
@@ -198,13 +197,11 @@ function relinkDashboardToMaster(dashboardSheet, masterName) {
         .replace(/Gift_KPI_MASTER/g, masterName)
         .replace(/[A-Za-z0-9_]+_KPI_MASTER/g, masterName);
       if (next !== f) {
-        formulas[r][c] = next;
-        changed = true;
+        // Use per-cell update to avoid table-header validation errors on bulk setFormulas.
+        dashboardSheet.getRange(r + 1, c + 1).setFormula(next);
       }
     }
   }
-
-  if (changed) range.setFormulas(formulas);
 }
 
 function ensureDashboard(ss, dashboardName, masterName) {
