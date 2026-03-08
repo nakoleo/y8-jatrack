@@ -1315,19 +1315,45 @@ export default function App() {
       return googleAccessToken;
     }
     if (!currentUser) return null;
+    const driveProvider = createDriveProvider();
+
+    const readAccessToken = (result: unknown) => {
+      const credential = GoogleAuthProvider.credentialFromResult(result as any);
+      return credential?.accessToken || '';
+    };
+
     try {
-      const result = await reauthenticateWithPopup(currentUser, googleProvider);
-      const credential = GoogleAuthProvider.credentialFromResult(result);
-      const accessToken = credential?.accessToken || '';
+      const result = await reauthenticateWithPopup(currentUser, driveProvider);
+      const accessToken = readAccessToken(result);
       if (accessToken) {
         setGoogleAccessToken(accessToken);
         setGoogleAccessTokenExpiry(Date.now() + 50 * 60 * 1000);
         return accessToken;
       }
+    } catch (error) {
+      console.warn('Drive reauth failed, fallback to popup sign-in:', error);
+    }
+
+    try {
+      const result = await signInWithPopup(auth, driveProvider);
+      const accessToken = readAccessToken(result);
+      if (accessToken) {
+        setGoogleAccessToken(accessToken);
+        setGoogleAccessTokenExpiry(Date.now() + 50 * 60 * 1000);
+        return accessToken;
+      }
+      showToast('❌ ไม่ได้รับสิทธิ์ Google Drive จากบัญชีที่ล็อกอิน');
       return null;
     } catch (error) {
       console.error('Drive auth:', error);
-      showToast('❌ ต้องอนุญาต Google Drive ก่อนอัปโหลดไฟล์');
+      const code = (error as { code?: string })?.code || '';
+      if (code === 'auth/popup-blocked') {
+        showToast('❌ Popup ถูกบล็อก กรุณาอนุญาต popup แล้วลองใหม่');
+      } else if (code === 'auth/popup-closed-by-user') {
+        showToast('❌ ยกเลิกการอนุญาต Google Drive');
+      } else {
+        showToast('❌ ต้องอนุญาต Google Drive ก่อนอัปโหลดไฟล์');
+      }
       return null;
     }
   };
@@ -1354,6 +1380,12 @@ export default function App() {
     if (!uploadRes.ok) {
       const errText = await uploadRes.text().catch(() => '');
       console.error('Drive upload:', errText);
+      if (uploadRes.status === 404 && driveFolderId.trim()) {
+        throw new Error('drive_folder_not_found');
+      }
+      if (uploadRes.status === 403) {
+        throw new Error('drive_forbidden');
+      }
       throw new Error('drive_upload_failed');
     }
 
@@ -1396,7 +1428,14 @@ export default function App() {
       showToast(`อัปโหลดไฟล์แล้ว: ${file.name}`);
     } catch (error) {
       console.error('Drive upload error:', error);
-      showToast('❌ อัปโหลด Google Drive ไม่สำเร็จ');
+      const message = (error as { message?: string })?.message || '';
+      if (message === 'drive_folder_not_found') {
+        showToast('❌ ไม่พบ Drive Folder ID ที่ตั้งไว้');
+      } else if (message === 'drive_forbidden') {
+        showToast('❌ ไม่มีสิทธิ์อัปโหลด (ตรวจ Drive API/สิทธิ์โฟลเดอร์)');
+      } else {
+        showToast('❌ อัปโหลด Google Drive ไม่สำเร็จ');
+      }
     } finally {
       if (mode === 'log') setDriveUploading(false);
       else setDriveUploadingEdit(false);
@@ -1458,6 +1497,7 @@ export default function App() {
       uid:       currentUser?.uid || '',
       email:     normalizeEmail(currentUser?.email),
       nickname,
+      ownerKey: sheets.ownerKey,
       masterSheetName: sheets.masterSheetName,
       dashboardSheetName: sheets.dashboardSheetName,
       timestamp: new Date().toISOString(),
@@ -2181,8 +2221,7 @@ export default function App() {
             />
             <button
               onClick={() => {
-                const t = `function cleanName(v) {\n  return String(v || '').replace(/[\\\\\\\\\\/?*\\[\\]:]/g, '').trim().replace(/\\s+/g, '_').slice(0, 70);\n}\n\nfunction ensureSheet(ss, name) {\n  var sh = ss.getSheetByName(name);\n  if (!sh) sh = ss.insertSheet(name);\n  return sh;\n}\n\nfunction ensureDashboard(ss, dashboardName) {\n  var sh = ss.getSheetByName(dashboardName);\n  if (sh) return sh;\n  var template = ss.getSheetByName('Gift_Dashboard');\n  if (template) {\n    return template.copyTo(ss).setName(dashboardName);\n  }\n  sh = ss.insertSheet(dashboardName);\n  sh.getRange('A1').setValue('Dashboard template not found: Gift_Dashboard');\n  return sh;\n}\n\nfunction doPost(e) {\n  var ss = SpreadsheetApp.getActiveSpreadsheet();\n  var d = JSON.parse(e.postData.contents || '{}');\n  var nick = cleanName(d.nickname || d.name || ('user_' + String(d.uid || '').slice(0, 6))) || 'User';\n  var masterName = d.masterSheetName || (nick + '_KPI_MASTER');\n  var dashboardName = d.dashboardSheetName || (nick + '_Dashboard');\n\n  var master = ensureSheet(ss, masterName);\n  ensureDashboard(ss, dashboardName);\n\n  if (master.getLastRow() === 0) {\n    master.appendRow(['Date','Name','Nickname','Email','UID','Group','Task ID','Task Name','Qty','Unit','Credits','Notes','Canva','Drive','Timestamp']);\n  }\n\n  master.appendRow([\n    d.date, d.name, nick, d.email, d.uid, d.group, d.taskId, d.taskName,\n    d.quantity, d.unit, d.credits, d.notes, d.canvaLink, d.driveLink, d.timestamp\n  ]);\n\n  return ContentService.createTextOutput(JSON.stringify({ ok: true, masterName: masterName, dashboardName: dashboardName }))\n    .setMimeType(ContentService.MimeType.JSON);\n}`;
-                navigator.clipboard.writeText(t).then(() => showToast('คัดลอก GAS Template แล้ว ✓'));
+                navigator.clipboard.writeText(GAS_TEMPLATE).then(() => showToast('คัดลอก GAS Template แล้ว ✓'));
               }}
               className="w-full py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-[11px] font-bold text-slate-500 flex items-center justify-center gap-1.5 active:bg-orange-50 transition-colors"
             >
