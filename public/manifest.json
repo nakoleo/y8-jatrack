@@ -1,0 +1,13 @@
+{
+  "name": "Jatrack",
+  "short_name": "Jatrack",
+  "description": "KPI Tracker — Y8 Young Age · PV",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#FDFAF7",
+  "theme_color": "#F4823C",
+  "orientation": "portrait",
+  "icons": [
+    { "src": "/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable" }
+  ]
+}

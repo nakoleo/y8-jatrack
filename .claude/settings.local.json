@@ -1,0 +1,24 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(echo \"PATH=$PATH\")",
+      "Bash(/bin/bash -l -c \"which node && node -v && which npm && npm -v\")",
+      "Bash(/bin/zsh -l -c \"which node && node -v && which npm && npm -v\")",
+      "Bash(/bin/zsh -l -c \"echo $PATH\")",
+      "Bash(mdfind \"kMDItemDisplayName == ''node''\")",
+      "Bash(sudo ls /usr/local/bin/node)",
+      "Bash(/opt/homebrew/bin/node --version)",
+      "Bash(brew --version)",
+      "Bash(brew list node)",
+      "Bash(brew install node)",
+      "Bash(/opt/homebrew/bin/npm --version)",
+      "Bash(/opt/homebrew/bin/npm install)",
+      "mcp__Claude_Preview__preview_start",
+      "Bash(/opt/homebrew/bin/npm install firebase)",
+      "Bash(python3 -c \":*)",
+      "Bash(npm run build)",
+      "Bash(firebase deploy --only hosting)",
+      "Bash(firebase deploy)"
+    ]
+  }
+}
