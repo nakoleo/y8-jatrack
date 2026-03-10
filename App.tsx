@@ -1748,9 +1748,19 @@ export default function App() {
   // ── Keep selected group/task valid after config changes
   useEffect(() => {
     const keys = Object.keys(kpiConfig);
-    if (!keys.length) return;
+    if (!keys.length) {
+      if (selectedGroup) setSelectedGroup('');
+      if (selectedTaskId) setSelectedTaskId('');
+      return;
+    }
+    if (activeTab === 'log' && !visibleLogGroupKeys.length) {
+      if (selectedGroup) setSelectedGroup('');
+      if (selectedTaskId) setSelectedTaskId('');
+      return;
+    }
     if (!kpiConfig[selectedGroup]) {
-      const first = keys[0];
+      const first = activeTab === 'log' ? visibleLogGroupKeys[0] : keys[0];
+      if (!first) return;
       setSelectedGroup(first);
       setSelectedTaskId(kpiConfig[first]?.tasks[0]?.id || '');
       return;
@@ -1759,7 +1769,26 @@ export default function App() {
     if (!taskIds.includes(selectedTaskId)) {
       setSelectedTaskId(taskIds[0] || '');
     }
-  }, [kpiConfig, selectedGroup, selectedTaskId]);
+  }, [activeTab, kpiConfig, selectedGroup, selectedTaskId, visibleLogGroupKeys]);
+
+  useEffect(() => {
+    if (activeTab !== 'log') return;
+    if (!visibleLogGroupKeys.length) {
+      if (selectedGroup) setSelectedGroup('');
+      if (selectedTaskId) setSelectedTaskId('');
+      return;
+    }
+    if (!visibleLogGroupKeys.includes(selectedGroup)) {
+      const firstVisible = visibleLogGroupKeys[0];
+      setSelectedGroup(firstVisible);
+      setSelectedTaskId(kpiConfig[firstVisible]?.tasks[0]?.id || '');
+      return;
+    }
+    const visibleTaskIds = (kpiConfig[selectedGroup]?.tasks || []).map((t) => t.id);
+    if (!visibleTaskIds.includes(selectedTaskId)) {
+      setSelectedTaskId(visibleTaskIds[0] || '');
+    }
+  }, [activeTab, kpiConfig, selectedGroup, selectedTaskId, visibleLogGroupKeys]);
 
   // ── Auth handlers
   const persistGoogleToken = (uid: string, token: string) => {
@@ -2142,6 +2171,7 @@ export default function App() {
     const target = Math.max(0, Number(newTarget ?? monthlyTarget) || 0);
     // Immediately sync local state so UI updates without waiting for Firestore listener
     setKpiConfig(updated);
+    setLogBrandMode('all');
     if (newTarget !== undefined) setMonthlyTarget(target);
     await setDoc(doc(db, 'kpiConfigs', currentUser.uid), {
       groups: updated,
@@ -3477,9 +3507,40 @@ export default function App() {
 
                 {/* Group + Task — Expand/Collapse with animation */}
                 <div className="space-y-2">
-                  <label className="text-[9px] font-bold text-slate-400 uppercase tracking-widest">กลุ่มงาน</label>
+                  <div className="flex items-center justify-between gap-3">
+                    <label className="text-[9px] font-bold text-slate-400 uppercase tracking-widest">กลุ่มงาน</label>
+                    <div className="inline-flex items-center gap-1 rounded-full bg-slate-100 p-1">
+                      {(['all', 'y8', 'pv'] as const).map((mode) => {
+                        const active = logBrandMode === mode;
+                        const label = mode === 'all' ? 'All' : mode.toUpperCase();
+                        return (
+                          <button
+                            key={mode}
+                            type="button"
+                            onClick={() => setLogBrandMode(mode)}
+                            className="px-3 py-1.5 rounded-full text-[10px] font-black tracking-wide transition-all"
+                            style={{
+                              background: active ? 'linear-gradient(135deg, #F4823C, #F5A855)' : 'transparent',
+                              color: active ? 'white' : '#64748B',
+                              boxShadow: active ? '0 6px 16px rgba(244,130,60,0.22)' : 'none',
+                            }}
+                          >
+                            {label}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
                   <div className="space-y-2">
-                    {orderedGroupKeys.map((key) => {
+                    {visibleLogGroupKeys.length === 0 && (
+                      <div className="rounded-[18px] border border-dashed border-orange-200 bg-orange-50/70 px-4 py-4">
+                        <p className="text-[11px] font-bold text-[#F4823C]">ไม่มีกลุ่ม KPI สำหรับ {logBrandModeLabel}</p>
+                        <p className="text-[10px] text-slate-500 mt-1">
+                          ไปที่ KPI Config แล้วติ๊กแบรนด์ให้กลุ่มงาน หรือสลับกลับเป็น All เพื่อดูทั้งหมด
+                        </p>
+                      </div>
+                    )}
+                    {visibleLogGroupKeys.map((key) => {
                       const grp        = kpiConfig[key];
                       const isActive   = selectedGroup === key;
                       const isExpanded = expandedGroups.has(key) || (autoHoverExpand && hoveredGroup === key);
@@ -3567,11 +3628,12 @@ export default function App() {
                 <div className="flex gap-3 items-end">
                   <div className="flex-1 space-y-1.5">
                     <label className="text-[9px] font-bold text-slate-400 uppercase tracking-widest">
-                      จำนวน ({currentTask?.unit})
+                      จำนวน ({currentTask?.unit || '-'})
                     </label>
                     <div className="flex items-center bg-slate-50 border border-slate-200 rounded-xl overflow-hidden">
                       <button
                         onClick={() => setQuantity(Math.max(1, quantity - 1))}
+                        disabled={!currentTask}
                         className="w-11 h-11 flex items-center justify-center text-slate-400 active:bg-slate-100 transition-colors"
                       >
                         <Minus size={16} />
@@ -3579,6 +3641,7 @@ export default function App() {
                       <span className="flex-1 text-center text-[22px] font-black text-[#2C2A28]">{quantity}</span>
                       <button
                         onClick={() => setQuantity(quantity + 1)}
+                        disabled={!currentTask}
                         className="w-11 h-11 flex items-center justify-center text-slate-400 active:bg-slate-100 transition-colors"
                       >
                         <Plus size={16} />
@@ -3588,7 +3651,7 @@ export default function App() {
                   <div className="space-y-1.5">
                     <label className="text-[9px] font-bold text-slate-400 uppercase tracking-widest">Credits</label>
                     <div className="h-11 px-4 rounded-xl flex items-center justify-center gap-1 min-w-[76px]" style={{ background: 'linear-gradient(135deg, #F4823C, #F5A855)' }}>
-                      <span className="text-[22px] font-light text-white">{quantity * (currentTask?.creditPerUnit || 1)}</span>
+                      <span className="text-[22px] font-light text-white">{quantity * (currentTask?.creditPerUnit || 0)}</span>
                       <span className="text-[9px] text-white/60 mt-1">Cr.</span>
                     </div>
                   </div>
@@ -3687,11 +3750,11 @@ export default function App() {
 
                 <button
                   onClick={handleAddEntry}
-                  disabled={isLoading}
-                  className={`w-full py-4 text-white rounded-xl font-bold text-[13px] tracking-[0.15em] shadow-md active:scale-95 transition-all glow-orange ${isLoading ? 'opacity-60' : ''}`}
+                  disabled={isLoading || !currentTask}
+                  className={`w-full py-4 text-white rounded-xl font-bold text-[13px] tracking-[0.15em] shadow-md active:scale-95 transition-all glow-orange ${(isLoading || !currentTask) ? 'opacity-60' : ''}`}
                   style={{ background: 'linear-gradient(135deg, #F4823C, #F5A855)' }}
                 >
-                  {isLoading ? <RefreshCw className="animate-spin mx-auto" size={18} /> : 'บันทึกข้อมูล'}
+                  {isLoading ? <RefreshCw className="animate-spin mx-auto" size={18} /> : currentTask ? 'บันทึกข้อมูล' : 'ไม่มีกลุ่มให้บันทึก'}
                 </button>
               </div>
             </section>
