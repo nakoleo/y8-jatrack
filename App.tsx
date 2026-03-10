@@ -2643,11 +2643,33 @@ export default function App() {
 
   const postSheetsWebhook = async (payload: SheetsWebhookPayload): Promise<SheetsWebhookResponse> => {
     if (!sheetsWebhookUrl) throw new Error('webhook_missing');
+    const body = JSON.stringify(payload);
+    const isAppsScriptWebhook = (() => {
+      try {
+        const hostname = new URL(sheetsWebhookUrl).hostname;
+        return hostname === 'script.google.com' || hostname === 'script.googleusercontent.com';
+      } catch {
+        return false;
+      }
+    })();
+
+    // Apps Script web apps execute the POST, then answer with a redirect that breaks fetch/CORS.
+    // Beacon transport skips response handling and reliably reaches the script in real browsers.
+    if (isAppsScriptWebhook && typeof navigator !== 'undefined' && typeof navigator.sendBeacon === 'function') {
+      const accepted = navigator.sendBeacon(
+        sheetsWebhookUrl,
+        new Blob([body], { type: 'text/plain;charset=utf-8' })
+      );
+      if (!accepted) throw new Error('webhook_beacon_failed');
+      return { ok: true, version: 'beacon' };
+    }
+
     const response = await fetch(sheetsWebhookUrl, {
       method: 'POST',
       // Use a CORS-safelisted content type so browser requests avoid OPTIONS preflight.
       headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-      body: JSON.stringify(payload),
+      body,
+      keepalive: true,
     });
     let data: SheetsWebhookResponse | null = null;
     try {
