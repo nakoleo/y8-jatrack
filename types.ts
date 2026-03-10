@@ -19,10 +19,31 @@ export interface WorkGroup {
   color: string;
   bg: string;
   border?: string;
+  icon?: string;              // custom emoji/symbol (fallback = group key letter)
+  brands?: ('y8' | 'pv')[];  // which brands this group serves (Y8 / PV / both)
   tasks: Task[];
 }
 
 export type WorkGroups = Record<string, WorkGroup>;
+
+export interface DriveAttachment {
+  originalName:   string;   // ชื่อไฟล์ต้นฉบับ
+  normalizedName: string;   // ชื่อไฟล์ที่ normalize แล้ว เช่น A01_08032026_tontawan_01.jpg
+  fileId:         string;   // Google Drive file ID
+  link:           string;   // webViewLink
+  mimeType:       string;   // MIME type ของไฟล์
+}
+
+// ─── LOCAL FILE REFERENCE ─────────────────────────────────────────────────────
+
+export interface LocalFileRef {
+  name:         string;    // ชื่อไฟล์
+  size:         number;    // ขนาด bytes
+  type:         string;    // MIME type
+  lastModified: number;    // timestamp
+  thumbnail?:   string;    // base64 JPEG thumbnail (สำหรับ image, สูงสุด 64x64px)
+  idbKey:       string;    // key ใน IndexedDB สำหรับดึง FileSystemFileHandle กลับมา
+}
 
 export interface WorkEntry {
   id: string;
@@ -36,8 +57,10 @@ export interface WorkEntry {
   credits: number;
   notes: string;
   createdAt: number;
-  canvaLink?: string;   // Canva presentation/board URL
-  driveLink?: string;   // Google Drive file/folder URL
+  canvaLink?:    string;              // Canva presentation/board URL
+  driveLink?:    string;              // Drive link (backward compat / manual paste)
+  attachments?:  DriveAttachment[];   // Multi-file Drive uploads
+  localFiles?:   LocalFileRef[];      // Local file references (File System Access API)
 }
 
 // ─── ROLE SYSTEM ──────────────────────────────────────────────────────────────
@@ -76,6 +99,14 @@ export interface UserProfile {
   isAdmin: boolean;
   createdAt: number;
   updatedAt: number;
+  customTitle?: string;   // user-defined position title (overrides role label)
+  settings?: {            // persisted cross-device settings
+    autoHoverExpand?: boolean;
+    calY8Url?: string;
+    calPvUrl?: string;
+    driveFolderId?: string;
+    sheetUrl?: string;
+  };
 }
 
 export type TabType = 'log' | 'today' | 'history' | 'summary' | 'admin';

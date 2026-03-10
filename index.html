@@ -36,12 +36,22 @@
             -webkit-font-smoothing: antialiased;
             -moz-osx-font-smoothing: grayscale;
         }
+        /* ── Safari viewport fix ── */
+        html {
+            height: 100%;
+            height: -webkit-fill-available;
+        }
         body {
             font-family: 'Prompt', -apple-system, BlinkMacSystemFont, sans-serif;
             background-color: var(--bg);
             color: var(--dark);
             -webkit-tap-highlight-color: transparent;
             overscroll-behavior: none;
+            min-height: 100vh;
+            min-height: -webkit-fill-available;
+        }
+        #root {
+            height: 100%;
         }
         .py-safe {
             padding-top: env(safe-area-inset-top);

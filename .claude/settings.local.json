@@ -18,7 +18,20 @@
       "Bash(python3 -c \":*)",
       "Bash(npm run build)",
       "Bash(firebase deploy --only hosting)",
-      "Bash(firebase deploy)"
+      "Bash(firebase deploy)",
+      "Bash(git credential:*)",
+      "Bash(npx tsc --noEmit)",
+      "Bash(echo \"EXIT:$?\")",
+      "Bash(pip3 install pandas openpyxl -q)",
+      "Bash(pip3 install pandas openpyxl -q --break-system-packages)",
+      "Bash(python3 -:*)",
+      "Bash(firebase auth:export /tmp/users.json --format=json)",
+      "Bash(node -e \"require\\(''firebase-admin''\\)\")",
+      "Bash(npm install firebase-admin --prefix /tmp/fa-temp)",
+      "Bash(GOOGLE_CLOUD_PROJECT=jartrack-y8pv FIRESTORE_EMULATOR_HOST=\"\" node --experimental-vm-modules /tmp/seed_gift_kpi.mjs)",
+      "Bash(gcloud auth application-default print-access-token)",
+      "Bash(python3 -c \"import json,sys; d=json.load\\(sys.stdin\\); print\\(list\\(d.get\\(''tokens'',{}\\).keys\\(\\)\\)[:3]\\)\")",
+      "Bash(python3 /tmp/seed_firestore.py)"
     ]
   }
 }

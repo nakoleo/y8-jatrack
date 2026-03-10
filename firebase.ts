@@ -17,11 +17,17 @@ export const firebaseApp   = initializeApp(firebaseConfig);
 export const db            = getFirestore(firebaseApp);   // Firestore Database
 export const auth          = getAuth(firebaseApp);        // Authentication
 export const storage       = getStorage(firebaseApp);     // Storage (file upload)
-export const googleProvider = new GoogleAuthProvider();   // Google Sign-in (basic profile)
+// Main sign-in provider — includes Drive + Sheets scopes so users grant all at once
+export const googleProvider = new GoogleAuthProvider();
+googleProvider.addScope('https://www.googleapis.com/auth/drive.file');
+googleProvider.addScope('https://www.googleapis.com/auth/spreadsheets');
+googleProvider.setCustomParameters({ include_granted_scopes: 'true' });
 
+// Drive-only re-auth provider (fallback if token expired)
 export const createDriveProvider = () => {
   const provider = new GoogleAuthProvider();
   provider.addScope('https://www.googleapis.com/auth/drive.file');
+  provider.addScope('https://www.googleapis.com/auth/spreadsheets');
   provider.setCustomParameters({
     prompt: 'consent',
     include_granted_scopes: 'true',

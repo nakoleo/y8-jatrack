@@ -6,18 +6,20 @@ import {
   ChevronDown, FileText, Sparkles, Download, RefreshCw,
   LogOut, ChevronLeft, ChevronRight, TrendingUp, Wifi, WifiOff,
   Save, Sliders, UserCircle, Upload, ExternalLink, AlertTriangle,
+  FolderOpen,
 } from 'lucide-react';
 import {
   collection, collectionGroup, doc, setDoc, deleteDoc,
-  onSnapshot, query, orderBy,
+  onSnapshot, query, orderBy, getDocs,
 } from 'firebase/firestore';
 import {
   signInWithPopup, signOut, onAuthStateChanged, type User,
   reauthenticateWithPopup, GoogleAuthProvider,
+  createUserWithEmailAndPassword, signInWithEmailAndPassword,
 } from 'firebase/auth';
 import { db, auth, googleProvider, createDriveProvider, firebaseApp } from './firebase';
 import { WORK_GROUPS } from './constants';
-import { WorkEntry, WorkGroup, WorkGroups, TabType, UserProfile, RoleId } from './types';
+import { WorkEntry, WorkGroup, WorkGroups, TabType, UserProfile, RoleId, DriveAttachment, LocalFileRef } from './types';
 import { ROLE_DEFAULTS, ROLE_EMOJI } from './roleDefaults';
 
 // ─── HELPERS ─────────────────────────────────────────────────────────────────
@@ -171,91 +173,280 @@ const extractGoogleApiReason = (raw: string) => {
   }
 };
 
-const GAS_TEMPLATE = `function cleanName(v) {
-  return String(v || '')
-    .replace(/[\\\\/?*\\[\\]:]/g, '')
-    .trim()
-    .replace(/\\s+/g, '_')
-    .slice(0, 70);
+/**
+ * สร้างชื่อไฟล์มาตรฐาน: [TASKID]_[DDMMYYYY]_[NICKNAME]_[NN].[ext]
+ * เช่น A01_08032026_tontawan_01.jpg
+ */
+const normalizeFileName = (
+  originalName: string,
+  taskId: string,
+  entryDate: string,  // 'YYYY-MM-DD'
+  nickname: string,
+  index: number,
+): string => {
+  const ext = originalName.split('.').pop()?.toLowerCase() || 'bin';
+  const [y = '0000', m = '00', d = '00'] = entryDate.split('-');
+  const ddmmyyyy = `${d}${m}${y}`;
+  const nick = nickname.toLowerCase().replace(/\s+/g, '_').replace(/[^a-z0-9_]/g, '') || 'user';
+  const seq = String(index + 1).padStart(2, '0');
+  return `${taskId}_${ddmmyyyy}_${nick}_${seq}.${ext}`;
+};
+
+interface PendingUploadFile {
+  file: File;
+  normalizedName: string;
+  mode: 'log' | 'edit';
 }
 
-function ensureSheet(ss, name) {
-  var sh = ss.getSheetByName(name);
-  if (!sh) sh = ss.insertSheet(name);
+// GAS Webhook URL — pre-configured so users don't need to enter it manually
+const DEFAULT_GAS_WEBHOOK = 'https://script.google.com/macros/s/AKfycbwZyi-i1WHuJaYwvvIZH6fyrbN58t8d4kbj6hzThKXKT390OHJj-yydQJAqGBgbXOJM/exec';
+
+// GAS v3 — Single-spreadsheet, multi-user, auto-creates sheets, supports attachments[] + Drive folders + delete_user
+const GAS_TEMPLATE = `// ================================================================
+// JATRACK — Google Apps Script v3
+// Single Spreadsheet | Multi-User | Auto-Setup | Supports Attachments
+// Drive Folder Sync | User Delete Logging
+// Admin-only backend. Users never configure this.
+// ================================================================
+var VERSION = '3.0';
+var S_CONFIG  = '_CONFIG';
+var S_USERS   = '_USER_REGISTRY';
+var S_ENTRIES = 'ALL_ENTRIES';
+
+var ENTRY_HEADERS = [
+  'timestamp','date','uid','email','nickname','role',
+  'group','taskId','taskName','qty','unit','credits',
+  'notes','canvaLink','driveLink',
+  'attachments_count','attachments_links','attachments_names',
+  'entry_id'
+];
+var USER_HEADERS = [
+  'uid','email','nickname','role','kpiSheet',
+  'first_seen','last_seen','entry_count'
+];
+var KPI_HEADERS = [
+  'timestamp','date','group','taskId','taskName',
+  'qty','unit','credits','notes','canvaLink','driveLink',
+  'attachments_count','attachments_links','attachments_names',
+  'entry_id'
+];
+
+function cleanName(v, fallback) {
+  var s = String(v || '').replace(/[\\\\/?*[\\]:]/g, '').trim().replace(/\\s+/g, '_').slice(0, 60);
+  return s || (fallback || 'user');
+}
+
+function getOrCreate(ss, name) {
+  return ss.getSheetByName(name) || ss.insertSheet(name);
+}
+
+function styleHeader(sh, cols, bg, fg) {
+  sh.getRange(1, 1, 1, cols)
+    .setFontWeight('bold').setBackground(bg).setFontColor(fg || '#FFFFFF');
+  sh.setFrozenRows(1);
+}
+
+// ── Ensure system sheets exist ──────────────────────────────
+function ensureConfig(ss) {
+  var sh = getOrCreate(ss, S_CONFIG);
+  if (sh.getLastRow() === 0) {
+    sh.appendRow(['Key', 'Value']);
+    styleHeader(sh, 2, '#2C2A28');
+    sh.appendRow(['version', VERSION]);
+    sh.appendRow(['created_at', new Date().toISOString()]);
+    sh.appendRow(['note', 'Admin-only. Do not share this sheet with regular users.']);
+  }
   return sh;
 }
 
-function relinkDashboardToMaster(dashboardSheet, masterName) {
-  var range = dashboardSheet.getDataRange();
-  var formulas = range.getFormulas();
+function ensureUserRegistry(ss) {
+  var sh = getOrCreate(ss, S_USERS);
+  if (sh.getLastRow() === 0) {
+    sh.appendRow(USER_HEADERS);
+    styleHeader(sh, USER_HEADERS.length, '#F4823C');
+  }
+  return sh;
+}
 
-  for (var r = 0; r < formulas.length; r++) {
-    for (var c = 0; c < formulas[r].length; c++) {
-      var f = formulas[r][c];
-      if (!f) continue;
-      var next = f
-        .replace(/Gift_KPI_MASTER/g, masterName)
-        .replace(/[A-Za-z0-9_]+_KPI_MASTER/g, masterName);
-      if (next !== f) {
-        // Use per-cell update to avoid table-header validation errors on bulk setFormulas.
-        dashboardSheet.getRange(r + 1, c + 1).setFormula(next);
-      }
+function ensureAllEntries(ss) {
+  var sh = getOrCreate(ss, S_ENTRIES);
+  if (sh.getLastRow() === 0) {
+    sh.appendRow(ENTRY_HEADERS);
+    styleHeader(sh, ENTRY_HEADERS.length, '#2C2A28');
+    sh.setColumnWidth(1, 160); sh.setColumnWidth(3, 140);
+    sh.setColumnWidth(9, 150); sh.setColumnWidth(17, 220);
+  }
+  return sh;
+}
+
+// ── Per-user KPI sheet ──────────────────────────────────────
+function ensureKpiSheet(ss, sheetName, nickname) {
+  var sh = ss.getSheetByName(sheetName);
+  if (sh) return sh;
+  sh = ss.insertSheet(sheetName);
+  sh.appendRow(KPI_HEADERS);
+  styleHeader(sh, KPI_HEADERS.length, '#1D6F42');
+  sh.getRange('A1').setNote('KPI log for ' + nickname + '. Auto-created by JATRACK.');
+  return sh;
+}
+
+// ── Upsert user registry ────────────────────────────────────
+function upsertUser(sh, uid, email, nickname, role, kpiSheet) {
+  var data = sh.getDataRange().getValues();
+  for (var i = 1; i < data.length; i++) {
+    if (String(data[i][0]) === String(uid)) {
+      sh.getRange(i + 1, 3).setValue(nickname);
+      sh.getRange(i + 1, 7).setValue(new Date().toISOString());
+      sh.getRange(i + 1, 8).setValue(Number(data[i][7] || 0) + 1);
+      return;
+    }
+  }
+  sh.appendRow([uid, email, nickname, role, kpiSheet,
+    new Date().toISOString(), new Date().toISOString(), 1]);
+}
+
+// ── Parse attachments from payload ─────────────────────────
+function parseAtt(d) {
+  var atts = d.attachments;
+  if (!atts || !Array.isArray(atts) || atts.length === 0) {
+    return { count: 0, links: d.driveLink || '', names: '' };
+  }
+  return {
+    count: atts.length,
+    links: atts.map(function(a) { return a.link || ''; }).filter(Boolean).join(' | '),
+    names: atts.map(function(a) {
+      return a.normalizedName || a.originalName || '';
+    }).filter(Boolean).join(' | ')
+  };
+}
+
+// ── Drive folder helpers ────────────────────────────────────
+function getOrCreateFolder(parent, name) {
+  var iter = parent.getFoldersByName(name);
+  return iter.hasNext() ? iter.next() : parent.createFolder(name);
+}
+
+function syncDriveFolders(d) {
+  var rootId = d.rootFolderId;
+  if (!rootId) return { ok: false, error: 'rootFolderId missing' };
+  var root = DriveApp.getFolderById(rootId);
+  var groups = d.groups || [];
+  var created = [];
+  groups.forEach(function(g) {
+    var gName = g.name || g.key;
+    var gFolder = getOrCreateFolder(root, gName);
+    var subs = [];
+    var brands = g.brands || [];
+    if (brands.indexOf('y8') !== -1) { getOrCreateFolder(gFolder, 'Y8'); subs.push('Y8'); }
+    if (brands.indexOf('pv') !== -1) { getOrCreateFolder(gFolder, 'PV'); subs.push('PV'); }
+    created.push(gName + (subs.length ? ' [' + subs.join(', ') + ']' : ''));
+  });
+  return { ok: true, created: created };
+}
+
+function logDeleteUser(d, ss) {
+  var sh = ensureUserRegistry(ss);
+  var data = sh.getDataRange().getValues();
+  for (var i = 1; i < data.length; i++) {
+    if (String(data[i][0]) === String(d.uid)) {
+      sh.getRange(i + 1, 4).setValue('[DELETED] ' + (d.nickname || ''));
+      sh.getRange(i + 1, 7).setValue(new Date().toISOString());
+      return;
     }
   }
 }
 
-function ensureDashboard(ss, dashboardName, masterName) {
-  var sh = ss.getSheetByName(dashboardName);
-  if (sh) {
-    relinkDashboardToMaster(sh, masterName);
-    return sh;
-  }
-
-  var template = ss.getSheetByName('Gift_Dashboard');
-  if (template) {
-    sh = template.copyTo(ss).setName(dashboardName);
-    relinkDashboardToMaster(sh, masterName);
-    return sh;
-  }
-
-  sh = ss.insertSheet(dashboardName);
-  sh.getRange('A1').setValue('Dashboard template not found: Gift_Dashboard');
-  return sh;
-}
-
-function keepPairTogether(ss, masterSheet, dashboardSheet) {
-  var masterIndex = masterSheet.getIndex();
-  var dashboardIndex = dashboardSheet.getIndex();
-  if (dashboardIndex === masterIndex + 1) return;
-  ss.setActiveSheet(dashboardSheet);
-  ss.moveActiveSheet(masterIndex + 1);
-}
-
-function doPost(e) {
-  var ss = SpreadsheetApp.getActiveSpreadsheet();
-  var d = JSON.parse((e && e.postData && e.postData.contents) || '{}');
-
-  var nick = cleanName(d.nickname || d.name || ('user_' + String(d.uid || '').slice(0, 6))) || 'User';
-  var ownerKey = cleanName(d.ownerKey || (nick + '_' + String(d.uid || '').slice(0, 6))) || nick;
-  var masterName = cleanName(d.masterSheetName || (ownerKey + '_KPI_MASTER'));
-  var dashboardName = cleanName(d.dashboardSheetName || (ownerKey + '_Dashboard'));
-
-  var master = ensureSheet(ss, masterName);
-  var dashboard = ensureDashboard(ss, dashboardName, masterName);
-  keepPairTogether(ss, master, dashboard);
-
-  if (master.getLastRow() === 0) {
-    master.appendRow(['Date','Name','Nickname','Email','UID','Group','Task ID','Task Name','Qty','Unit','Credits','Notes','Canva','Drive','Timestamp']);
-  }
-
-  master.appendRow([
-    d.date, d.name, nick, d.email, d.uid, d.group, d.taskId, d.taskName,
-    d.quantity, d.unit, d.credits, d.notes, d.canvaLink, d.driveLink, d.timestamp
-  ]);
-
+// ── doGet — health check ────────────────────────────────────
+function doGet() {
   return ContentService
-    .createTextOutput(JSON.stringify({ ok: true, ownerKey: ownerKey, masterName: masterName, dashboardName: dashboardName }))
+    .createTextOutput(JSON.stringify({ ok: true, version: VERSION, service: 'JATRACK GAS v3' }))
     .setMimeType(ContentService.MimeType.JSON);
+}
+
+// ── doPost — main entry webhook ─────────────────────────────
+function doPost(e) {
+  try {
+    var ss  = SpreadsheetApp.getActiveSpreadsheet();
+    var d   = JSON.parse((e && e.postData && e.postData.contents) || '{}');
+
+    // ── Action routing (v3) ─────────────────────────────────
+    var action = d.action || '';
+    if (action === 'sync_drive_folders') {
+      var folderResult = syncDriveFolders(d);
+      return ContentService
+        .createTextOutput(JSON.stringify(folderResult))
+        .setMimeType(ContentService.MimeType.JSON);
+    }
+    if (action === 'delete_user') {
+      logDeleteUser(d, ss);
+      return ContentService
+        .createTextOutput(JSON.stringify({ ok: true, version: VERSION }))
+        .setMimeType(ContentService.MimeType.JSON);
+    }
+
+    var uid      = String(d.uid || '');
+    var email    = String(d.email || '');
+    var nickname = cleanName(d.nickname || d.name || ('user_' + uid.slice(0, 6)), 'User');
+    var role     = cleanName(d.role || 'member', 'member');
+    var kpiName  = nickname + '_KPI';
+    var att      = parseAtt(d);
+
+    ensureConfig(ss);
+    var userReg    = ensureUserRegistry(ss);
+    var allEntries = ensureAllEntries(ss);
+    var kpiSheet   = ensureKpiSheet(ss, kpiName, nickname);
+
+    upsertUser(userReg, uid, email, nickname, role, kpiName);
+
+    // Write to ALL_ENTRIES (master log)
+    allEntries.appendRow([
+      d.timestamp || new Date().toISOString(), d.date || '', uid, email,
+      nickname, role, d.group || '', d.taskId || '', d.taskName || '',
+      d.quantity || 0, d.unit || '', d.credits || 0, d.notes || '',
+      d.canvaLink || '', d.driveLink || '',
+      att.count, att.links, att.names, d.id || ''
+    ]);
+
+    // Write to per-user KPI sheet
+    kpiSheet.appendRow([
+      d.timestamp || new Date().toISOString(), d.date || '',
+      d.group || '', d.taskId || '', d.taskName || '',
+      d.quantity || 0, d.unit || '', d.credits || 0, d.notes || '',
+      d.canvaLink || '', d.driveLink || '',
+      att.count, att.links, att.names, d.id || ''
+    ]);
+
+    return ContentService
+      .createTextOutput(JSON.stringify({ ok: true, version: VERSION, nickname: nickname, kpiSheet: kpiName }))
+      .setMimeType(ContentService.MimeType.JSON);
+  } catch (err) {
+    return ContentService
+      .createTextOutput(JSON.stringify({ ok: false, error: String(err) }))
+      .setMimeType(ContentService.MimeType.JSON);
+  }
+}
+
+// ── Admin: run once to initialise all sheets ────────────────
+function adminSetup() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  ensureConfig(ss);
+  ensureUserRegistry(ss);
+  ensureAllEntries(ss);
+  SpreadsheetApp.getUi().alert(
+    '✅ JATRACK v3 Setup Complete!\\n\\n' +
+    'Sheets created:\\n  _CONFIG\\n  _USER_REGISTRY\\n  ALL_ENTRIES\\n\\n' +
+    'New in v3: Drive folder sync + user delete logging.\\n\\n' +
+    'Deploy as Web App → Execute as: Me → Anyone access.\\n' +
+    'Paste the /exec URL into JATRACK app Settings.'
+  );
+}
+
+// ── Admin menu in Google Sheets ─────────────────────────────
+function onOpen() {
+  SpreadsheetApp.getUi()
+    .createMenu('🟠 JATRACK Admin')
+    .addItem('▶ Setup All Sheets', 'adminSetup')
+    .addToUi();
 }
 `;
 
@@ -267,9 +458,16 @@ const Modal = ({
 }) => {
   if (!isOpen) return null;
   return (
-    <div className="fixed inset-0 z-[100] flex items-end justify-center bg-black/40 backdrop-blur-sm animate-in fade-in duration-200">
-      <div className="bg-white w-full max-w-md rounded-t-[36px] px-6 pt-7 pb-[calc(2rem+env(safe-area-inset-bottom))] shadow-2xl animate-in slide-in-from-bottom duration-300">
-        <div className="flex justify-between items-center mb-5">
+    <div
+      className="fixed inset-0 z-[100] flex items-end justify-center bg-black/40 backdrop-blur-sm animate-in fade-in duration-200"
+      onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
+    >
+      <div
+        className="bg-white w-full max-w-md rounded-t-[36px] shadow-2xl animate-in slide-in-from-bottom duration-300 flex flex-col"
+        style={{ maxHeight: 'min(92dvh, calc(100vh - env(safe-area-inset-top, 0px) - 1rem))' }}
+      >
+        {/* Sticky title row */}
+        <div className="flex justify-between items-center px-6 pt-7 pb-4 shrink-0">
           <h3 className="text-base font-bold text-[#2C2A28] tracking-tight">{title}</h3>
           <button
             onClick={onClose}
@@ -278,7 +476,13 @@ const Modal = ({
             <X size={18} />
           </button>
         </div>
-        {children}
+        {/* Scrollable body */}
+        <div
+          className="overflow-y-auto flex-1 px-6 pb-[calc(2.5rem+env(safe-area-inset-bottom))]"
+          style={{ WebkitOverflowScrolling: 'touch' } as React.CSSProperties}
+        >
+          {children}
+        </div>
       </div>
     </div>
   );
@@ -330,71 +534,143 @@ const GroupBar = ({
 
 // ─── ENTRY CARD ──────────────────────────────────────────────────────────────
 function EntryCard({
-  entry, workGroups, onEdit, onDelete,
+  entry, workGroups, onEdit, onDelete, onShowToast,
 }: {
   key?: React.Key;
   entry: WorkEntry;
   workGroups: WorkGroups;
   onEdit: (e: WorkEntry) => void;
   onDelete: (id: string) => void;
+  onShowToast: (msg: string) => void;
 }) {
   const group = workGroups[entry.groupId];
-  const task = group?.tasks.find((tk) => tk.id === entry.taskId);
+  const task  = group?.tasks.find((tk) => tk.id === entry.taskId);
+
+  // ── Swipe-to-delete
+  const [swipeOffset, setSwipeOffset] = useState(0);
+  const swipeStartX = useRef(0);
+
+  const onTouchStart = (e: React.TouchEvent) => {
+    swipeStartX.current = e.touches[0].clientX;
+  };
+  const onTouchMove = (e: React.TouchEvent) => {
+    const dx = e.touches[0].clientX - swipeStartX.current;
+    if (dx < -5) setSwipeOffset(Math.max(dx, -90));
+  };
+  const onTouchEnd = () => {
+    if (swipeOffset < -60) onDelete(entry.id);
+    setSwipeOffset(0);
+  };
+
+  const hasLinks = entry.canvaLink || entry.driveLink ||
+    (entry.attachments && entry.attachments.length > 0) ||
+    (entry.localFiles  && entry.localFiles.length  > 0);
+
   return (
-    <div className="bg-white px-4 py-3.5 rounded-[20px] border border-slate-100/80 flex items-center gap-3 shadow-sm">
+    <div className="relative overflow-hidden rounded-[20px]">
+      {/* Red "delete" layer behind */}
+      <div className="absolute inset-0 bg-rose-500 flex items-center justify-end pr-4 rounded-[20px]">
+        <Trash2 size={16} className="text-white" />
+      </div>
+      {/* Swipeable card */}
       <div
-        className="w-9 h-9 rounded-[12px] flex items-center justify-center font-black text-[11px] shrink-0"
-        style={{ backgroundColor: group?.bg || '#f3f4f6', color: group?.color || '#4B5563' }}
+        onTouchStart={onTouchStart}
+        onTouchMove={onTouchMove}
+        onTouchEnd={onTouchEnd}
+        style={{
+          transform:  `translateX(${swipeOffset}px)`,
+          transition: swipeOffset === 0 ? 'transform 0.3s ease' : 'none',
+        }}
+        className="relative bg-white px-4 py-3.5 rounded-[20px] border border-slate-100/80 flex items-center gap-3 shadow-sm"
       >
-        {entry.groupId}
-      </div>
-      <div className="flex-1 min-w-0">
-        <p className="font-bold text-[#2C2A28] text-[13px] leading-tight truncate">{task?.name || 'Unknown'}</p>
-        <p className="text-[10px] text-slate-300 font-semibold uppercase tracking-wider mt-0.5">
-          {entry.quantity} {task?.unit || 'หน่วย'} ·{' '}
-          <span className="text-[#F4823C]">{entry.credits} Cr.</span>
-        </p>
-        {entry.notes ? (
-          <p className="text-[10px] text-slate-400 mt-0.5 truncate">{entry.notes}</p>
-        ) : null}
-        {(entry.canvaLink || entry.driveLink) && (
-          <div className="flex gap-1 mt-1.5 flex-wrap">
-            {entry.canvaLink && (
-              <a
-                href={entry.canvaLink}
-                target="_blank"
-                rel="noopener noreferrer"
-                onClick={e => e.stopPropagation()}
-                className="text-[8px] font-black px-2 py-0.5 rounded-md text-white tracking-wide"
-                style={{ background: '#7C3AED' }}
-              >Canva ↗</a>
-            )}
-            {entry.driveLink && (
-              <a
-                href={entry.driveLink}
-                target="_blank"
-                rel="noopener noreferrer"
-                onClick={e => e.stopPropagation()}
-                className="text-[8px] font-black px-2 py-0.5 rounded-md text-white tracking-wide"
-                style={{ background: '#1D6F42' }}
-              >Drive ↗</a>
-            )}
-          </div>
-        )}
-      </div>
-      <div className="flex gap-0.5 shrink-0">
-        <button
-          onClick={() => onEdit(entry)}
-          className="w-8 h-8 flex items-center justify-center rounded-xl text-slate-300 transition-colors active:bg-slate-50"
+        <div
+          className="w-9 h-9 rounded-[12px] flex items-center justify-center font-black text-[11px] shrink-0"
+          style={{ backgroundColor: group?.bg || '#f3f4f6', color: group?.color || '#4B5563' }}
         >
-          <Edit3 size={14} />
-        </button>
-        <button
-          onClick={() => onDelete(entry.id)}
-          className="w-8 h-8 flex items-center justify-center rounded-xl text-slate-300 transition-colors active:bg-rose-50 active:text-rose-400"
-        >
-          <Trash2 size={14} />
-        </button>
+          {group?.icon || entry.groupId.slice(0, 1)}
+        </div>
+        <div className="flex-1 min-w-0">
+          <p className="font-bold text-[#2C2A28] text-[13px] leading-tight truncate">{task?.name || 'Unknown'}</p>
+          <p className="text-[10px] text-slate-300 font-semibold uppercase tracking-wider mt-0.5">
+            {entry.quantity} {task?.unit || 'หน่วย'} ·{' '}
+            <span className="text-[#F4823C]">{entry.credits} Cr.</span>
+          </p>
+          {entry.notes ? (
+            <p className="text-[10px] text-slate-400 mt-0.5 truncate">{entry.notes}</p>
+          ) : null}
+          {hasLinks && (
+            <div className="flex gap-1 mt-1.5 flex-wrap">
+              {entry.canvaLink && (
+                <a href={entry.canvaLink} target="_blank" rel="noopener noreferrer"
+                  onClick={e => e.stopPropagation()}
+                  className="text-[8px] font-black px-2 py-0.5 rounded-md text-white tracking-wide"
+                  style={{ background: '#7C3AED' }}>Canva ↗</a>
+              )}
+              {entry.attachments && entry.attachments.length > 0
+                ? entry.attachments.map((att, i) => (
+                    <a key={i} href={att.link} target="_blank" rel="noopener noreferrer"
+                      onClick={e => e.stopPropagation()}
+                      title={att.normalizedName}
+                      className="text-[8px] font-black px-2 py-0.5 rounded-md text-white tracking-wide"
+                      style={{ background: '#1D6F42' }}>
+                      {entry.attachments!.length > 1 ? `Drive ${i + 1} ↗` : 'Drive ↗'}
+                    </a>
+                  ))
+                : entry.driveLink && (
+                    <a href={entry.driveLink} target="_blank" rel="noopener noreferrer"
+                      onClick={e => e.stopPropagation()}
+                      className="text-[8px] font-black px-2 py-0.5 rounded-md text-white tracking-wide"
+                      style={{ background: '#1D6F42' }}>Drive ↗</a>
+                  )
+              }
+              {/* Local files */}
+              {entry.localFiles && entry.localFiles.map((lf, i) => (
+                <button
+                  key={`lf-${i}`}
+                  onClick={async (e) => {
+                    e.stopPropagation();
+                    if (lf.idbKey) {
+                      const handle = await idbGet(lf.idbKey);
+                      if (handle) {
+                        try {
+                          const perm = await handle.requestPermission({ mode: 'read' });
+                          if (perm === 'granted') {
+                            const file = await handle.getFile();
+                            const url  = URL.createObjectURL(file);
+                            window.open(url, '_blank');
+                            return;
+                          }
+                        } catch { /* fall through */ }
+                      }
+                    }
+                    onShowToast('ไฟล์ไม่พร้อมใช้งาน — เปิดบนอุปกรณ์เดิม');
+                  }}
+                  className="text-[8px] font-black px-2 py-0.5 rounded-md text-white tracking-wide flex items-center gap-1"
+                  style={{ background: '#0F766E' }}
+                >
+                  {lf.thumbnail && (
+                    <img src={lf.thumbnail} className="w-4 h-4 rounded object-cover" alt="" />
+                  )}
+                  {lf.name.length > 12 ? lf.name.slice(0, 12) + '…' : lf.name}
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+        <div className="flex gap-0.5 shrink-0">
+          <button
+            onClick={() => onEdit(entry)}
+            className="w-8 h-8 flex items-center justify-center rounded-xl text-slate-300 transition-colors active:bg-slate-50"
+          >
+            <Edit3 size={14} />
+          </button>
+          <button
+            onClick={() => onDelete(entry.id)}
+            className="w-8 h-8 flex items-center justify-center rounded-xl text-slate-300 transition-colors active:bg-rose-50 active:text-rose-400"
+          >
+            <Trash2 size={14} />
+          </button>
+        </div>
       </div>
     </div>
   );
@@ -459,6 +735,17 @@ function KpiEditor({
   const [saving, setSaving]           = useState(false);
   const [expandedGroup, setExpandedGroup] = useState<string | null>(Object.keys(config)[0] || null);
   const [editingGroupKey, setEditingGroupKey] = useState<string | null>(null);
+
+  // ── Group icon / brand helpers
+  const updateGroupIcon = (gKey: string, icon: string) =>
+    setDraft(prev => ({ ...prev, [gKey]: { ...prev[gKey], icon: icon || undefined } }));
+
+  const toggleGroupBrand = (gKey: string, brand: 'y8' | 'pv', checked: boolean) =>
+    setDraft(prev => {
+      const cur = prev[gKey].brands || [];
+      const next = checked ? ([...cur, brand] as ('y8' | 'pv')[]) : cur.filter(b => b !== brand);
+      return { ...prev, [gKey]: { ...prev[gKey], brands: next } };
+    });
 
   // ── Task CRUD
   const updateTask = (gKey: string, taskId: string, field: string, value: string | number) => {
@@ -540,7 +827,7 @@ function KpiEditor({
     }
   };
 
-  const groups = Object.entries(draft) as [string, WorkGroup][];
+  const groups = (Object.entries(draft) as [string, WorkGroup][]).sort(([a], [b]) => a.localeCompare(b));
 
   return (
     <div className="fixed inset-0 z-[150] bg-[#FDFAF7] flex flex-col max-w-md mx-auto left-0 right-0">
@@ -604,17 +891,29 @@ function KpiEditor({
         {groups.map(([key, group]) => (
           <div key={key} className="bg-white rounded-[20px] border border-slate-100 overflow-hidden shadow-sm">
             {/* Group Header */}
-            <div className="flex items-center gap-1 px-3 py-3">
+            <div className="flex items-center gap-2 px-3 py-3">
+              {/* Icon input — lives inside the colored badge */}
+              <div
+                className="w-9 h-9 rounded-[12px] flex items-center justify-center shrink-0"
+                style={{ backgroundColor: group.bg }}
+              >
+                <input
+                  type="text"
+                  value={group.icon || ''}
+                  maxLength={2}
+                  onChange={e => updateGroupIcon(key, e.target.value.slice(0, 2))}
+                  placeholder={key.slice(0, 1)}
+                  className="w-full h-full text-center bg-transparent outline-none text-[14px] font-black rounded-[12px]"
+                  style={{ color: group.color }}
+                  onClick={e => e.stopPropagation()}
+                />
+              </div>
+
+              {/* Name + brand tags — tap to expand */}
               <button
                 onClick={() => setExpandedGroup(expandedGroup === key ? null : key)}
-                className="flex items-center gap-3 flex-1 text-left"
+                className="flex items-center gap-2 flex-1 text-left min-w-0"
               >
-                <div
-                  className="w-9 h-9 rounded-[12px] flex items-center justify-center text-[10px] font-black shrink-0"
-                  style={{ backgroundColor: group.bg, color: group.color }}
-                >
-                  {key.length <= 3 ? key : key.slice(0, 1)}
-                </div>
                 <div className="flex-1 min-w-0">
                   {editingGroupKey === key ? (
                     <input
@@ -629,13 +928,34 @@ function KpiEditor({
                   ) : (
                     <p className="font-bold text-[#2C2A28] text-[13px] truncate">{group.name}</p>
                   )}
-                  <p className="text-[10px] text-slate-400">{group.tasks.length} รายการ</p>
+                  {/* Brand chips */}
+                  <div className="flex items-center gap-2 mt-0.5">
+                    {(['y8', 'pv'] as const).map(brand => (
+                      <label
+                        key={brand}
+                        className="flex items-center gap-1 text-[10px] cursor-pointer select-none"
+                        onClick={e => e.stopPropagation()}
+                      >
+                        <input
+                          type="checkbox"
+                          checked={(group.brands || []).includes(brand)}
+                          onChange={e => toggleGroupBrand(key, brand, e.target.checked)}
+                          className="w-3 h-3 accent-[#F4823C]"
+                        />
+                        <span className="font-bold" style={{ color: brand === 'y8' ? '#F4823C' : '#E87AA5' }}>
+                          {brand === 'y8' ? 'Y8' : 'PV'}
+                        </span>
+                      </label>
+                    ))}
+                    <span className="text-[9px] text-slate-300">{group.tasks.length} รายการ</span>
+                  </div>
                 </div>
                 <ChevronDown
                   size={15}
-                  className={`text-slate-300 transition-transform duration-200 shrink-0 ${expandedGroup === key ? 'rotate-180' : ''}`}
+                  className={`text-slate-300 transition-transform duration-300 shrink-0 ${expandedGroup === key ? 'rotate-180' : ''}`}
                 />
               </button>
+
               <button
                 onClick={() => setEditingGroupKey(key)}
                 className="w-7 h-7 flex items-center justify-center rounded-lg text-slate-300 active:text-[#F4823C] active:bg-orange-50 transition-colors"
@@ -759,6 +1079,38 @@ function KpiEditor({
   );
 }
 
+// ─── INDEXEDDB HELPERS (Local File System Access) ────────────────────────────
+const IDB_DB    = 'jatrack_files';
+const IDB_STORE = 'handles';
+
+function idbGet(key: string): Promise<FileSystemFileHandle | null> {
+  return new Promise((resolve) => {
+    const req = indexedDB.open(IDB_DB, 1);
+    req.onupgradeneeded = () => req.result.createObjectStore(IDB_STORE);
+    req.onsuccess = () => {
+      const tx = req.result.transaction(IDB_STORE, 'readonly');
+      const r  = tx.objectStore(IDB_STORE).get(key);
+      r.onsuccess = () => resolve((r.result as FileSystemFileHandle) || null);
+      r.onerror   = () => resolve(null);
+    };
+    req.onerror = () => resolve(null);
+  });
+}
+
+function idbSet(key: string, handle: FileSystemFileHandle): Promise<void> {
+  return new Promise((resolve) => {
+    const req = indexedDB.open(IDB_DB, 1);
+    req.onupgradeneeded = () => req.result.createObjectStore(IDB_STORE);
+    req.onsuccess = () => {
+      const tx = req.result.transaction(IDB_STORE, 'readwrite');
+      tx.objectStore(IDB_STORE).put(handle, key);
+      tx.oncomplete = () => resolve();
+      tx.onerror    = () => resolve();
+    };
+    req.onerror = () => resolve();
+  });
+}
+
 // ─── APP LOGO ────────────────────────────────────────────────────────────────
 const AppLogo = ({ size = 80 }: { size?: number }) => (
   <div
@@ -792,73 +1144,120 @@ const LoadingScreen = () => (
 
 // ─── SIGN IN SCREEN ───────────────────────────────────────────────────────────
 const SignInScreen = ({
-  onSignIn, loading, toast,
+  onSignIn, onEmailSignIn, onEmailRegister, loading, toast,
 }: {
   onSignIn: () => void;
+  onEmailSignIn: (email: string, password: string) => Promise<void>;
+  onEmailRegister: (email: string, password: string) => Promise<void>;
   loading: boolean;
   toast: { show: boolean; message: string };
-}) => (
-  <div className="flex flex-col min-h-[100dvh] max-w-md mx-auto bg-[#FDFAF7] items-center justify-center px-7">
-    <Toast {...toast} />
-    {/* Background warm glow */}
-    <div className="absolute inset-0 overflow-hidden pointer-events-none">
-      <div className="absolute top-1/4 left-1/2 -translate-x-1/2 w-80 h-80 bg-orange-200/20 rounded-full blur-3xl" />
-    </div>
+}) => {
+  const [mode, setMode] = React.useState<'google' | 'email'>('google');
+  const [isRegister, setIsRegister] = React.useState(false);
+  const [email, setEmail] = React.useState('');
+  const [password, setPassword] = React.useState('');
+  const [emailLoading, setEmailLoading] = React.useState(false);
 
-    <div className="flex flex-col items-center mb-12 animate-in zoom-in duration-500 relative z-10">
-      {/* Floating icon with parallax shadow */}
-      <div className="relative flex flex-col items-center mb-6">
-        {/* Ambient glow ring */}
-        <div
-          className="absolute inset-[-18px] rounded-[46px] animate-glow pointer-events-none"
-          style={{ background: 'radial-gradient(circle, rgba(244,130,60,0.28) 0%, transparent 70%)' }}
-        />
-        {/* Floating icon */}
-        <div className="animate-float relative z-10">
-          <AppLogo size={88} />
-        </div>
-        {/* Ground shadow — parallax offset */}
-        <div
-          className="absolute bottom-[-14px] left-1/2 w-[56px] h-[10px] rounded-full blur-xl animate-shadow pointer-events-none"
-          style={{ background: 'rgba(244,130,60,0.55)' }}
-        />
+  const handleEmail = async () => {
+    if (!email.trim() || !password.trim()) return;
+    setEmailLoading(true);
+    try {
+      if (isRegister) await onEmailRegister(email.trim(), password);
+      else            await onEmailSignIn(email.trim(), password);
+    } finally {
+      setEmailLoading(false);
+    }
+  };
+
+  return (
+    <div className="flex flex-col min-h-[100dvh] max-w-md mx-auto bg-[#FDFAF7] items-center justify-center px-7">
+      <Toast {...toast} />
+      <div className="absolute inset-0 overflow-hidden pointer-events-none">
+        <div className="absolute top-1/4 left-1/2 -translate-x-1/2 w-80 h-80 bg-orange-200/20 rounded-full blur-3xl" />
       </div>
-      <h1 className="text-[20px] font-light text-[#2C2A28] tracking-[0.15em]">Jatrack</h1>
-      <p className="text-[11px] text-[#F4823C] font-bold mt-0.5 tracking-[0.35em] uppercase">KPI Tracker</p>
-    </div>
 
-    <div className="w-full space-y-3.5 animate-in slide-in-from-bottom duration-500 relative z-10">
-      <button
-        onClick={onSignIn}
-        disabled={loading}
-        className="w-full py-4 bg-white border border-orange-100 rounded-2xl font-bold text-[14px] text-[#2C2A28] tracking-wide shadow-sm active:scale-95 transition-all flex items-center justify-center gap-3 disabled:opacity-60"
-        style={{ boxShadow: '0 4px 20px rgba(244,130,60,0.12)' }}
-      >
-        {loading ? (
-          <RefreshCw size={18} className="animate-spin text-orange-300" />
+      <div className="flex flex-col items-center mb-10 animate-in zoom-in duration-500 relative z-10">
+        <div className="relative flex flex-col items-center mb-6">
+          <div className="absolute inset-[-18px] rounded-[46px] animate-glow pointer-events-none"
+            style={{ background: 'radial-gradient(circle, rgba(244,130,60,0.28) 0%, transparent 70%)' }} />
+          <div className="animate-float relative z-10"><AppLogo size={88} /></div>
+          <div className="absolute bottom-[-14px] left-1/2 w-[56px] h-[10px] rounded-full blur-xl animate-shadow pointer-events-none"
+            style={{ background: 'rgba(244,130,60,0.55)' }} />
+        </div>
+        <h1 className="text-[20px] font-light text-[#2C2A28] tracking-[0.15em]">Jatrack</h1>
+        <p className="text-[11px] text-[#F4823C] font-bold mt-0.5 tracking-[0.35em] uppercase">KPI Tracker</p>
+      </div>
+
+      {/* Tab switcher */}
+      <div className="w-full flex bg-slate-100 rounded-2xl p-1 mb-5 relative z-10">
+        <button onClick={() => setMode('google')}
+          className={`flex-1 py-2.5 rounded-xl text-[12px] font-bold transition-all ${mode === 'google' ? 'bg-white shadow-sm text-[#2C2A28]' : 'text-slate-400'}`}>
+          🔵 Google
+        </button>
+        <button onClick={() => setMode('email')}
+          className={`flex-1 py-2.5 rounded-xl text-[12px] font-bold transition-all ${mode === 'email' ? 'bg-white shadow-sm text-[#2C2A28]' : 'text-slate-400'}`}>
+          ✉️ Email
+        </button>
+      </div>
+
+      <div className="w-full space-y-3 animate-in slide-in-from-bottom duration-500 relative z-10">
+        {mode === 'google' ? (
+          <>
+            <button onClick={onSignIn} disabled={loading}
+              className="w-full py-4 bg-white border border-orange-100 rounded-2xl font-bold text-[14px] text-[#2C2A28] tracking-wide shadow-sm active:scale-95 transition-all flex items-center justify-center gap-3 disabled:opacity-60"
+              style={{ boxShadow: '0 4px 20px rgba(244,130,60,0.12)' }}>
+              {loading ? <RefreshCw size={18} className="animate-spin text-orange-300" /> : (
+                <>
+                  <svg width="20" height="20" viewBox="0 0 24 24" fill="none">
+                    <path d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z" fill="#4285F4"/>
+                    <path d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" fill="#34A853"/>
+                    <path d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l3.66-2.84z" fill="#FBBC05"/>
+                    <path d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z" fill="#EA4335"/>
+                  </svg>
+                  Sign in with Google
+                </>
+              )}
+            </button>
+            <p className="text-center text-[10px] text-slate-300">
+              แนะนำ · รองรับ Google Drive &amp; Sheets อัตโนมัติ
+            </p>
+          </>
         ) : (
           <>
-            <svg width="20" height="20" viewBox="0 0 24 24" fill="none">
-              <path d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z" fill="#4285F4"/>
-              <path d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" fill="#34A853"/>
-              <path d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l3.66-2.84z" fill="#FBBC05"/>
-              <path d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z" fill="#EA4335"/>
-            </svg>
-            Sign in with Google
+            <div className="flex bg-white rounded-2xl border border-slate-100 overflow-hidden text-[12px] font-bold">
+              <button onClick={() => setIsRegister(false)}
+                className={`flex-1 py-2.5 transition-colors ${!isRegister ? 'bg-[#F4823C] text-white' : 'text-slate-400'}`}>
+                เข้าสู่ระบบ
+              </button>
+              <button onClick={() => setIsRegister(true)}
+                className={`flex-1 py-2.5 transition-colors ${isRegister ? 'bg-[#F4823C] text-white' : 'text-slate-400'}`}>
+                สมัครสมาชิก
+              </button>
+            </div>
+            <input type="email" placeholder="อีเมล" value={email} onChange={e => setEmail(e.target.value)}
+              className="w-full px-4 py-3.5 bg-white border border-slate-200 rounded-2xl text-[13px] outline-none"
+              onKeyDown={e => e.key === 'Enter' && void handleEmail()} />
+            <input type="password" placeholder="รหัสผ่าน (6 ตัวขึ้นไป)" value={password} onChange={e => setPassword(e.target.value)}
+              className="w-full px-4 py-3.5 bg-white border border-slate-200 rounded-2xl text-[13px] outline-none"
+              onKeyDown={e => e.key === 'Enter' && void handleEmail()} />
+            <button onClick={() => void handleEmail()} disabled={emailLoading || !email || !password}
+              className="w-full py-4 rounded-2xl font-bold text-[14px] text-white active:scale-95 transition-all disabled:opacity-50 flex items-center justify-center gap-2"
+              style={{ background: 'linear-gradient(135deg, #F4823C, #F5A855)' }}>
+              {emailLoading ? <RefreshCw size={16} className="animate-spin" /> : (isRegister ? '📧 สมัครสมาชิก' : '🔑 เข้าสู่ระบบ')}
+            </button>
+            <p className="text-center text-[10px] text-slate-300">
+              ⚠️ อีเมล + รหัสผ่าน ไม่รองรับอัพโหลด Google Drive โดยตรง
+            </p>
           </>
         )}
-      </button>
-      <p className="text-center text-[10px] text-slate-300 leading-relaxed">
-        ข้อมูลของแต่ละบัญชีจะถูกเก็บแยกกันใน Cloud
+      </div>
+
+      <p className="absolute bottom-6 left-0 right-0 text-center text-[9px] text-slate-300 tracking-widest">
+        © 2026 Young Age Corporation Co., Ltd. &amp; Pharvia 2025 Co., Ltd.
       </p>
     </div>
-
-    {/* Copyright */}
-    <p className="absolute bottom-6 left-0 right-0 text-center text-[9px] text-slate-300 tracking-widest">
-      © 2026 Y8 Young Age Co., Ltd. All rights reserved.
-    </p>
-  </div>
-);
+  );
+};
 
 // ─── NICKNAME SETUP SCREEN ───────────────────────────────────────────────────
 const NicknameSetupScreen = ({
@@ -919,6 +1318,8 @@ const NicknameSetupScreen = ({
 
 // ─── APP ─────────────────────────────────────────────────────────────────────
 export default function App() {
+  type BrandMode = 'all' | 'y8' | 'pv';
+
   // ── Auth (Phase 3)
   const [currentUser, setCurrentUser]       = useState<User | null>(null);
   const [authLoading, setAuthLoading]       = useState(true);
@@ -941,8 +1342,11 @@ export default function App() {
   const [isLoading, setIsLoading]           = useState(false);
   const [isOnline, setIsOnline]             = useState(navigator.onLine);
 
-  const defaultSheetUrl = 'https://docs.google.com/spreadsheets/d/1229iCUcIAnkSKHOq2g3p36_NuzBuWzJma3DpDLIzJRo/edit?usp=sharing';
-  const [sheetUrl, setSheetUrl]             = useState<string>(defaultSheetUrl);
+  const [sheetUrl, setSheetUrl]             = useState<string>('');
+  const [geminiApiKey, setGeminiApiKey]     = useState('');
+  const [geminiResult, setGeminiResult]     = useState('');
+  const [geminiLoading, setGeminiLoading]   = useState(false);
+  const [showGemini, setShowGemini]         = useState(false);
 
   const [selectedDate, setSelectedDate]     = useState(getTodayStr());
   const [selectedGroup, setSelectedGroup]   = useState<string>('A');
@@ -955,6 +1359,7 @@ export default function App() {
   const [editEntry, setEditEntry]           = useState<WorkEntry | null>(null);
   const [deleteId, setDeleteId]             = useState<string | null>(null);
   const [showExportModal, setShowExportModal] = useState(false);
+  const [sheetsExporting, setSheetsExporting] = useState(false);
   const [showSettings, setShowSettings]     = useState(false);
   const [exportMonth, setExportMonth]       = useState(new Date().getMonth());
   const [exportYear, setExportYear]         = useState(new Date().getFullYear());
@@ -980,9 +1385,28 @@ export default function App() {
   // Entry link fields (LOG form)
   const [canvaLink, setCanvaLink]             = useState('');
   const [driveLink, setDriveLink]             = useState('');
-  const logDriveInputRef = useRef<HTMLInputElement | null>(null);
+  const [logAttachments, setLogAttachments]   = useState<DriveAttachment[]>([]);
+  // Rename-before-upload modal
+  const [pendingUploads, setPendingUploads]   = useState<PendingUploadFile[]>([]);
+  const [showRenameModal, setShowRenameModal] = useState(false);
+  const logDriveInputRef  = useRef<HTMLInputElement | null>(null);
   const editDriveInputRef = useRef<HTMLInputElement | null>(null);
+  // Cache Drive subfolder IDs to avoid repeated API lookups per session
+  const subfolderCache = useRef(new Map<string, string>());
   const isSuperAdmin = isSuperAdminEmail(currentUser?.email);
+
+  // ── New v3 states
+  const [syncQueueCount, setSyncQueueCount]       = useState(0);
+  const [customTitleDraft, setCustomTitleDraft]   = useState('');
+  const [showDriveTreeModal, setShowDriveTreeModal] = useState(false);
+  const [driveTreeLoading, setDriveTreeLoading]   = useState(false);
+  const [pendingLocalFiles, setPendingLocalFiles] = useState<LocalFileRef[]>([]);
+
+  // ── Group expand/collapse + brand/icon management
+  const [expandedGroups, setExpandedGroups]     = useState<Set<string>>(new Set());
+  const [autoHoverExpand, setAutoHoverExpand]   = useState(false);
+  const [hoveredGroup, setHoveredGroup]         = useState<string | null>(null);
+  const [logBrandMode, setLogBrandMode]         = useState<BrandMode>('all');
 
   // ── Offline detection
   useEffect(() => {
@@ -1003,12 +1427,32 @@ export default function App() {
     const readSetting = (key: string, fallback = '') =>
       localStorage.getItem(scopedKey(uid, key)) ?? fallback;
 
-    setSheetUrl(readSetting('sheet_url', defaultSheetUrl));
-    setSheetsWebhookUrl(readSetting('sheets_webhook', ''));
+    setSheetUrl(readSetting('sheet_url', ''));
+    // Always use DEFAULT_GAS_WEBHOOK unless admin has explicitly saved a different one
+    const savedWebhook = readSetting('sheets_webhook', '');
+    setSheetsWebhookUrl(savedWebhook || DEFAULT_GAS_WEBHOOK);
     setCalY8Url(readSetting('cal_y8', ''));
     setCalPvUrl(readSetting('cal_pv', ''));
     setDriveFolderId(readSetting('drive_folder_id', ''));
+    setGeminiApiKey(readSetting('gemini_api_key', ''));
+    const savedHover = readSetting('auto_hover_expand', '');
+    if (savedHover) {
+      try { setAutoHoverExpand(JSON.parse(savedHover) as boolean); } catch { /* ignore */ }
+    }
   }, [currentUser]);
+
+  // ── Init syncQueueCount when user changes
+  useEffect(() => {
+    if (!currentUser) { setSyncQueueCount(0); return; }
+    setSyncQueueCount(getWebhookQueue().length);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentUser]);
+
+  // ── Sync customTitleDraft when Settings opens
+  useEffect(() => {
+    if (!showSettings) return;
+    if (userProfile?.customTitle !== undefined) setCustomTitleDraft(userProfile.customTitle || '');
+  }, [showSettings]);
 
   // ── localStorage offline cache
   useEffect(() => {
@@ -1037,7 +1481,9 @@ export default function App() {
   const enqueueWebhook = (payload: Record<string, unknown>) => {
     const queue = getWebhookQueue();
     queue.push(payload);
-    setWebhookQueue(queue.slice(-200));
+    const trimmed = queue.slice(-200);
+    setWebhookQueue(trimmed);
+    setSyncQueueCount(trimmed.length);
   };
 
   // ── Firebase Auth listener (Phase 3)
@@ -1075,6 +1521,16 @@ export default function App() {
           };
           setUserProfile(merged);
           setNicknameDraft(merged.nickname || '');
+          // ── Load persistent settings + customTitle from Firestore
+          if (profile.customTitle) setCustomTitleDraft(profile.customTitle);
+          if (profile.settings) {
+            const s = profile.settings;
+            if (s.autoHoverExpand !== undefined) setAutoHoverExpand(s.autoHoverExpand);
+            if (s.calY8Url)       setCalY8Url(s.calY8Url);
+            if (s.calPvUrl)       setCalPvUrl(s.calPvUrl);
+            if (s.driveFolderId)  setDriveFolderId(s.driveFolderId);
+            if (s.sheetUrl)       setSheetUrl(s.sheetUrl);
+          }
 
           if (
             profile.role !== merged.role ||
@@ -1305,22 +1761,49 @@ export default function App() {
     }
   }, [kpiConfig, selectedGroup, selectedTaskId]);
 
-  // ── Auth handlers (Phase 3)
+  // ── Auth handlers
+  const persistGoogleToken = (uid: string, token: string) => {
+    const expiry = Date.now() + 50 * 60 * 1000;
+    localStorage.setItem(scopedKey(uid, 'google_token'), JSON.stringify({ token, expiry }));
+    setGoogleAccessToken(token);
+    setGoogleAccessTokenExpiry(expiry);
+  };
+
   const handleSignIn = async () => {
     setSignInLoading(true);
     try {
       const result = await signInWithPopup(auth, googleProvider);
       const credential = GoogleAuthProvider.credentialFromResult(result);
       const accessToken = credential?.accessToken;
-      if (accessToken) {
-        setGoogleAccessToken(accessToken);
-        setGoogleAccessTokenExpiry(Date.now() + 50 * 60 * 1000);
-      }
+      if (accessToken) persistGoogleToken(result.user.uid, accessToken);
     } catch (e) {
       console.error(e);
       showToast('❌ เข้าสู่ระบบไม่สำเร็จ');
     } finally {
       setSignInLoading(false);
+    }
+  };
+
+  const handleEmailSignIn = async (email: string, password: string) => {
+    try {
+      await signInWithEmailAndPassword(auth, email, password);
+    } catch (e: unknown) {
+      const code = (e as { code?: string })?.code || '';
+      if (code === 'auth/invalid-credential' || code === 'auth/wrong-password') showToast('❌ อีเมลหรือรหัสผ่านไม่ถูกต้อง');
+      else if (code === 'auth/user-not-found') showToast('❌ ไม่พบบัญชีนี้ ลองสมัครใหม่');
+      else showToast('❌ เข้าสู่ระบบไม่สำเร็จ');
+    }
+  };
+
+  const handleEmailRegister = async (email: string, password: string) => {
+    try {
+      await createUserWithEmailAndPassword(auth, email, password);
+      showToast('✅ สมัครสมาชิกสำเร็จ');
+    } catch (e: unknown) {
+      const code = (e as { code?: string })?.code || '';
+      if (code === 'auth/email-already-in-use') showToast('❌ อีเมลนี้มีบัญชีแล้ว ลองเข้าสู่ระบบ');
+      else if (code === 'auth/weak-password') showToast('❌ รหัสผ่านต้องมีอย่างน้อย 6 ตัวอักษร');
+      else showToast('❌ สมัครสมาชิกไม่สำเร็จ');
     }
   };
 
@@ -1334,10 +1817,24 @@ export default function App() {
   };
 
   const ensureDriveAccessToken = async (): Promise<string | null> => {
+    // 1. Check in-memory token (fastest)
     if (googleAccessToken && Date.now() < googleAccessTokenExpiry - 60_000) {
       return googleAccessToken;
     }
     if (!currentUser) return null;
+    // 2. Check localStorage-persisted token (survives page refresh)
+    const stored = localStorage.getItem(scopedKey(currentUser.uid, 'google_token'));
+    if (stored) {
+      try {
+        const { token, expiry } = JSON.parse(stored) as { token: string; expiry: number };
+        if (token && Date.now() < expiry - 60_000) {
+          setGoogleAccessToken(token);
+          setGoogleAccessTokenExpiry(expiry);
+          return token;
+        }
+      } catch { /* corrupt storage */ }
+    }
+    // 3. Fallback: popup re-auth
     const driveProvider = createDriveProvider();
 
     const readAccessToken = (result: unknown) => {
@@ -1349,8 +1846,7 @@ export default function App() {
       const result = await reauthenticateWithPopup(currentUser, driveProvider);
       const accessToken = readAccessToken(result);
       if (accessToken) {
-        setGoogleAccessToken(accessToken);
-        setGoogleAccessTokenExpiry(Date.now() + 50 * 60 * 1000);
+        persistGoogleToken(currentUser.uid, accessToken);
         return accessToken;
       }
     } catch (error) {
@@ -1361,8 +1857,7 @@ export default function App() {
       const result = await signInWithPopup(auth, driveProvider);
       const accessToken = readAccessToken(result);
       if (accessToken) {
-        setGoogleAccessToken(accessToken);
-        setGoogleAccessTokenExpiry(Date.now() + 50 * 60 * 1000);
+        persistGoogleToken(currentUser.uid, accessToken);
         return accessToken;
       }
       showToast('❌ ไม่ได้รับสิทธิ์ Google Drive จากบัญชีที่ล็อกอิน');
@@ -1381,7 +1876,8 @@ export default function App() {
     }
   };
 
-  const uploadFileToGoogleDrive = async (file: File): Promise<string | null> => {
+  // parentFolderId: if provided, overrides driveFolderId (used for subfolder uploads)
+  const uploadFileToGoogleDrive = async (file: File, parentFolderId?: string): Promise<{ link: string; fileId: string } | null> => {
     const accessToken = await ensureDriveAccessToken();
     if (!accessToken) return null;
 
@@ -1392,10 +1888,11 @@ export default function App() {
       return form;
     };
 
+    const effectiveFolder = (parentFolderId ?? driveFolderId).trim();
     const metadata: Record<string, unknown> = {
       name: file.name,
     };
-    if (driveFolderId.trim()) metadata.parents = [driveFolderId.trim()];
+    if (effectiveFolder) metadata.parents = [effectiveFolder];
 
     const uploadRequest = (body: FormData) => fetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,webViewLink', {
       method: 'POST',
@@ -1409,7 +1906,7 @@ export default function App() {
       const errText = await uploadRes.text().catch(() => '');
       const reason = extractGoogleApiReason(errText);
       console.error('Drive upload:', reason || errText);
-      if ((uploadRes.status === 404 || uploadRes.status === 400) && driveFolderId.trim()) {
+      if ((uploadRes.status === 404 || uploadRes.status === 400) && effectiveFolder) {
         const fallbackRes = await uploadRequest(buildForm({ name: file.name }));
         if (fallbackRes.ok) {
           uploadRes = fallbackRes;
@@ -1446,10 +1943,60 @@ export default function App() {
     const fileRes = await fetch(`https://www.googleapis.com/drive/v3/files/${uploaded.id}?fields=webViewLink,webContentLink`, {
       headers: { Authorization: `Bearer ${accessToken}` },
     });
-    if (!fileRes.ok) return uploaded.webViewLink || `https://drive.google.com/file/d/${uploaded.id}/view`;
+    if (!fileRes.ok) return { link: uploaded.webViewLink || `https://drive.google.com/file/d/${uploaded.id}/view`, fileId: uploaded.id };
 
     const fileData = await fileRes.json() as { webViewLink?: string; webContentLink?: string };
-    return fileData.webViewLink || fileData.webContentLink || `https://drive.google.com/file/d/${uploaded.id}/view`;
+    return { link: fileData.webViewLink || fileData.webContentLink || `https://drive.google.com/file/d/${uploaded.id}/view`, fileId: uploaded.id };
+  };
+
+  // ── Drive Subfolder Helper ─────────────────────────────────────────────────
+  // Returns an existing or newly-created subfolder ID inside parentFolderId.
+  // Results are cached per-session (subfolderCache) to avoid repeated API calls.
+  const getOrCreateDriveSubfolder = async (
+    parentFolderId: string,
+    subName: string,
+    token: string,
+  ): Promise<string> => {
+    const cacheKey = `${parentFolderId}/${subName}`;
+    const cached = subfolderCache.current.get(cacheKey);
+    if (cached) return cached;
+
+    // Search for an existing folder with this name inside the parent
+    const q = `mimeType='application/vnd.google-apps.folder' and name='${subName}' and '${parentFolderId}' in parents and trashed=false`;
+    try {
+      const searchRes = await fetch(
+        `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(q)}&fields=files(id)`,
+        { headers: { Authorization: `Bearer ${token}` } },
+      );
+      if (searchRes.ok) {
+        const data = await searchRes.json() as { files?: { id: string }[] };
+        if (data.files && data.files.length > 0) {
+          const id = data.files[0].id;
+          subfolderCache.current.set(cacheKey, id);
+          return id;
+        }
+      }
+      // Create subfolder
+      const createRes = await fetch('https://www.googleapis.com/drive/v3/files?fields=id', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: subName,
+          mimeType: 'application/vnd.google-apps.folder',
+          parents: [parentFolderId],
+        }),
+      });
+      if (createRes.ok) {
+        const created = await createRes.json() as { id?: string };
+        if (created.id) {
+          subfolderCache.current.set(cacheKey, created.id);
+          return created.id;
+        }
+      }
+    } catch {
+      // Swallow — fall through to parent folder
+    }
+    return parentFolderId; // Fallback: upload to parent folder
   };
 
   const handleConnectGoogleDrive = async () => {
@@ -1468,31 +2015,103 @@ export default function App() {
     }
   };
 
-  const handleDriveFileSelected = async (file: File, mode: 'log' | 'edit') => {
-    if (!file) return;
+  // ── เปิด rename modal เมื่อผู้ใช้เลือกไฟล์ (multi-file)
+  const handleDriveFilesSelected = (
+    e: React.ChangeEvent<HTMLInputElement>,
+    mode: 'log' | 'edit',
+  ) => {
+    const files = Array.from<File>(e.target.files || []);
+    e.target.value = '';
+    if (!files.length) return;
+    const taskId = mode === 'log'
+      ? (currentTask?.id || 'FILE')
+      : (editEntry?.taskId || 'FILE');
+    const date = mode === 'log' ? selectedDate : (editEntry?.date || getTodayStr());
+    const nick = userProfile?.nickname || displayName;
+    setPendingUploads(files.map((file, i) => ({
+      file,
+      normalizedName: normalizeFileName(file.name, taskId, date, nick, i),
+      mode,
+    })));
+    setShowRenameModal(true);
+  };
+
+  // ── อัปโหลดจริงหลังผู้ใช้ยืนยันชื่อไฟล์
+  // overrideUploads ใช้กรณีกด "อัปโหลดด้วยชื่อเดิม" เพื่อข้ามการตั้งชื่อ
+  const handleConfirmUploads = async (overrideUploads?: PendingUploadFile[]) => {
+    const uploads = overrideUploads ?? pendingUploads;
+    setShowRenameModal(false);
+    if (!uploads.length) return;
+    const mode = uploads[0].mode;
     if (mode === 'log') setDriveUploading(true);
     else setDriveUploadingEdit(true);
     try {
-      const link = await uploadFileToGoogleDrive(file);
-      if (!link) throw new Error('drive_link_missing');
-      if (mode === 'log') setDriveLink(link);
-      else setEditEntry(prev => (prev ? { ...prev, driveLink: link } : prev));
-      showToast(`อัปโหลดไฟล์แล้ว: ${file.name}`);
+      // ── Resolve target folder: Root → Group → (Brand if single) → YYYY-MM ──
+      let targetFolderId: string | undefined;
+      const baseFolderId = driveFolderId.trim();
+      if (baseFolderId) {
+        const token = await ensureDriveAccessToken();
+        if (token) {
+          const entryGroupId = mode === 'log' ? selectedGroup : (editEntry?.groupId || selectedGroup);
+          const grp          = kpiConfig[entryGroupId];
+          const entryDate    = mode === 'log' ? selectedDate : (editEntry?.date || getTodayStr());
+          const [y = '', m = ''] = entryDate.split('-');
+          const monthSub     = `${y}-${m}`;
+
+          let folderId = baseFolderId;
+
+          // Level 1: Group folder (named after group name)
+          if (grp?.name) {
+            folderId = await getOrCreateDriveSubfolder(folderId, grp.name, token);
+          }
+
+          // Level 2: Brand subfolder — only when group has exactly ONE brand (unambiguous)
+          const brands = grp?.brands ?? [];
+          if (brands.length === 1) {
+            folderId = await getOrCreateDriveSubfolder(folderId, brands[0].toUpperCase(), token);
+          }
+
+          // Level 3: YYYY-MM subfolder for chronological organization
+          targetFolderId = await getOrCreateDriveSubfolder(folderId, monthSub, token);
+        }
+      }
+
+      const newAttachments: DriveAttachment[] = [];
+      for (const { file, normalizedName } of uploads) {
+        const renamed = new File([file], normalizedName, { type: file.type });
+        const result = await uploadFileToGoogleDrive(renamed, targetFolderId);
+        if (result) {
+          newAttachments.push({
+            originalName:   file.name,
+            normalizedName,
+            fileId:         result.fileId,
+            link:           result.link,
+            mimeType:       file.type,
+          });
+        }
+      }
+      if (!newAttachments.length) throw new Error('no_files_uploaded');
+      if (mode === 'log') {
+        setLogAttachments(prev => [...prev, ...newAttachments]);
+        if (!driveLink) setDriveLink(newAttachments[0].link);
+      } else {
+        setEditEntry(prev => prev ? {
+          ...prev,
+          attachments: [...(prev.attachments || []), ...newAttachments],
+          driveLink:   prev.driveLink || newAttachments[0].link,
+        } : prev);
+      }
+      showToast(`✅ อัปโหลด ${newAttachments.length} ไฟล์สำเร็จ`);
     } catch (error) {
       console.error('Drive upload error:', error);
       const message = (error as { message?: string })?.message || '';
-      if (message === 'drive_folder_not_found') {
-        showToast('❌ ไม่พบ Drive Folder ID ที่ตั้งไว้');
-      } else if (message === 'drive_api_not_enabled') {
-        showToast('❌ ยังไม่เปิด Drive API ในโปรเจกต์ Google Cloud');
-      } else if (message === 'drive_scope_missing') {
-        showToast('❌ OAuth scope ยังไม่ครบ (ต้องมี drive.file)');
-      } else if (message === 'drive_forbidden') {
-        showToast('❌ ไม่มีสิทธิ์อัปโหลด (ตรวจ Test Users/สิทธิ์โฟลเดอร์)');
-      } else {
-        showToast('❌ อัปโหลด Google Drive ไม่สำเร็จ');
-      }
+      if (message === 'drive_folder_not_found')   showToast('❌ ไม่พบ Drive Folder ID ที่ตั้งไว้');
+      else if (message === 'drive_api_not_enabled') showToast('❌ ยังไม่เปิด Drive API ในโปรเจกต์');
+      else if (message === 'drive_scope_missing')   showToast('❌ OAuth scope ยังไม่ครบ (drive.file)');
+      else if (message === 'drive_forbidden')       showToast('❌ ไม่มีสิทธิ์อัปโหลด');
+      else showToast('❌ อัปโหลดไม่สำเร็จ');
     } finally {
+      setPendingUploads([]);
       if (mode === 'log') setDriveUploading(false);
       else setDriveUploadingEdit(false);
     }
@@ -1521,6 +2140,9 @@ export default function App() {
   const handleSaveKpiConfig = async (updated: WorkGroups, newTarget?: number) => {
     if (!currentUser) return;
     const target = Math.max(0, Number(newTarget ?? monthlyTarget) || 0);
+    // Immediately sync local state so UI updates without waiting for Firestore listener
+    setKpiConfig(updated);
+    if (newTarget !== undefined) setMonthlyTarget(target);
     await setDoc(doc(db, 'kpiConfigs', currentUser.uid), {
       groups: updated,
       monthlyTarget: target,
@@ -1532,12 +2154,57 @@ export default function App() {
     showToast('✅ บันทึก KPI Config แล้ว');
   };
 
+  // ── Local file picker (File System Access API with fallback)
+  const handlePickLocalFile = async (): Promise<LocalFileRef[]> => {
+    try {
+      if ('showOpenFilePicker' in window) {
+        type FilePicker = (o: object) => Promise<FileSystemFileHandle[]>;
+        const handles = await (window as unknown as { showOpenFilePicker: FilePicker }).showOpenFilePicker({ multiple: true });
+        const refs: LocalFileRef[] = [];
+        for (const handle of handles) {
+          const file   = await handle.getFile();
+          const idbKey = `${Date.now()}_${Math.random().toString(36).slice(2)}_${file.name}`;
+          await idbSet(idbKey, handle);
+          let thumbnail: string | undefined;
+          if (file.type.startsWith('image/')) {
+            const canvas = document.createElement('canvas');
+            canvas.width = canvas.height = 64;
+            const img = new Image();
+            img.src = URL.createObjectURL(file);
+            await new Promise(r => { img.onload = r; });
+            canvas.getContext('2d')?.drawImage(img, 0, 0, 64, 64);
+            thumbnail = canvas.toDataURL('image/jpeg', 0.7);
+            URL.revokeObjectURL(img.src);
+          }
+          refs.push({ name: file.name, size: file.size, type: file.type, lastModified: file.lastModified, thumbnail, idbKey });
+        }
+        setPendingLocalFiles(prev => [...prev, ...refs]);
+        return refs;
+      }
+      // Fallback for iOS / browsers without File System Access API
+      return await new Promise<LocalFileRef[]>((resolve) => {
+        const input = document.createElement('input');
+        input.type  = 'file';
+        input.multiple = true;
+        input.onchange = () => {
+          const files = Array.from(input.files || []);
+          const refs: LocalFileRef[] = files.map(f => ({
+            name: f.name, size: f.size, type: f.type,
+            lastModified: f.lastModified, idbKey: '',
+          }));
+          setPendingLocalFiles(prev => [...prev, ...refs]);
+          resolve(refs);
+        };
+        input.click();
+      });
+    } catch {
+      return [];
+    }
+  };
+
   // ── Sheets Auto-Push (fire-and-forget, no-cors)
   const pushToSheetsWebhook = (entry: WorkEntry) => {
-    if (!sheetsWebhookUrl) {
-      showToast('ยังไม่ได้ตั้งค่า Sheets Webhook ใน Settings');
-      return;
-    }
+    if (!sheetsWebhookUrl) return;
     const task = kpiConfig[entry.groupId]?.tasks.find(t => t.id === entry.taskId);
     const nickname = (userProfile?.nickname || displayName).trim();
     const sheets = buildSheetNames(nickname, currentUser?.uid);
@@ -1553,19 +2220,25 @@ export default function App() {
       credits:   entry.credits,
       notes:     entry.notes,
       canvaLink: entry.canvaLink || '',
-      driveLink: entry.driveLink || '',
+      driveLink: entry.driveLink || (entry.attachments?.[0]?.link ?? ''),
       uid:       currentUser?.uid || '',
       email:     normalizeEmail(currentUser?.email),
       nickname,
-      ownerKey: sheets.ownerKey,
-      masterSheetName: sheets.masterSheetName,
-      dashboardSheetName: sheets.dashboardSheetName,
+      role:      userProfile?.role || 'custom',
       timestamp: new Date().toISOString(),
-      // Backward-compatible payload (for legacy Apps Script)
-      id: entry.id,
-      user: entry.userName || displayName,
+      // Multi-file attachments (GAS v2)
+      attachments:      entry.attachments || [],
+      attachmentsCount: entry.attachments?.length ?? 0,
+      attachmentsLinks: entry.attachments?.map(a => a.link).join(' | ') ?? (entry.driveLink || ''),
+      attachmentsNames: entry.attachments?.map(a => a.normalizedName).join(' | ') ?? '',
+      // Backward-compatible fields (for legacy consumers)
+      id:        entry.id,
+      user:      entry.userName || displayName,
       groupName: kpiConfig[entry.groupId]?.name || entry.groupId,
-      channel: task?.channel || '',
+      channel:   task?.channel || '',
+      ownerKey:  sheets.ownerKey,
+      masterSheetName:    sheets.masterSheetName,
+      dashboardSheetName: sheets.dashboardSheetName,
     };
 
     if (!isOnline) {
@@ -1605,18 +2278,66 @@ export default function App() {
         }
       }
       setWebhookQueue(remaining);
+      setSyncQueueCount(remaining.length);
       if (remaining.length === 0) showToast('ส่งข้อมูลค้างไปชีตเรียบร้อย ✓');
     };
 
     void flush();
   }, [currentUser, sheetsWebhookUrl, isOnline]);
 
+  // ── Ordered group keys — always sorted alphabetically (A → B → C → D)
+  const orderedGroupKeys = useMemo(
+    () => Object.keys(kpiConfig).sort(),
+    [kpiConfig]
+  );
+
+  const visibleLogGroupKeys = useMemo(
+    () =>
+      orderedGroupKeys.filter((key) => {
+        if (logBrandMode === 'all') return true;
+        return kpiConfig[key]?.brands?.includes(logBrandMode) ?? false;
+      }),
+    [kpiConfig, logBrandMode, orderedGroupKeys]
+  );
+
+  const logBrandModeLabel = logBrandMode === 'all' ? 'All' : logBrandMode.toUpperCase();
+
+  // ── Admin: delete user data from Firestore + notify webhook
+  const handleDeleteAdminUser = async (uid: string, nickname: string) => {
+    if (uid === currentUser?.uid) { showToast('ไม่สามารถลบตัวเองได้'); return; }
+    if (!window.confirm(`ลบผู้ใช้ "${nickname}" ออกจากระบบ?\n\nข้อมูลทั้งหมดจะถูกลบถาวร\n(Firebase Auth ยังอยู่ แต่ไม่มีข้อมูลใดๆ)`)) return;
+    try {
+      // 1. ลบ entries subcollection
+      const entriesSnap = await getDocs(collection(db, 'users', uid, 'entries'));
+      await Promise.all(entriesSnap.docs.map(d => deleteDoc(d.ref)));
+      // 2. ลบ kpiConfig
+      await deleteDoc(doc(db, 'kpiConfigs', uid));
+      // 3. ลบ user profile doc
+      await deleteDoc(doc(db, 'users', uid));
+      // 4. Fire webhook notification (fire-and-forget, no-cors)
+      if (sheetsWebhookUrl) {
+        fetch(sheetsWebhookUrl, {
+          method: 'POST', mode: 'no-cors',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            action: 'delete_user', uid, nickname,
+            timestamp: new Date().toISOString(),
+          }),
+        }).catch(() => {});
+      }
+      showToast(`ลบผู้ใช้ "${nickname}" แล้ว ✓`);
+    } catch (err) {
+      showToast('เกิดข้อผิดพลาด: ' + (err as Error).message);
+    }
+  };
+
   // ── Derived state
   const currentTask = useMemo(() => {
-    const group = kpiConfig[selectedGroup];
-    if (!group) return (Object.values(kpiConfig) as WorkGroup[])[0]?.tasks[0];
+    const fallbackGroupKey = visibleLogGroupKeys[0] || orderedGroupKeys[0];
+    const group = kpiConfig[selectedGroup] || (fallbackGroupKey ? kpiConfig[fallbackGroupKey] : undefined);
+    if (!group) return undefined;
     return group.tasks.find((t) => t.id === selectedTaskId) || group.tasks[0];
-  }, [kpiConfig, selectedGroup, selectedTaskId]);
+  }, [kpiConfig, orderedGroupKeys, selectedGroup, selectedTaskId, visibleLogGroupKeys]);
 
   const displayName =
     userProfile?.nickname?.trim() ||
@@ -1674,6 +2395,7 @@ export default function App() {
     const percent        = safePercent(totalCredits, monthlyTarget);
 
     const groups = Object.keys(kpiConfig)
+      .sort((a, b) => a.localeCompare(b))
       .map((key) => ({
         key,
         name:    kpiConfig[key].name,
@@ -1681,8 +2403,7 @@ export default function App() {
         bg:      kpiConfig[key].bg,
         credits: monthEntries.filter((e) => e.groupId === key).reduce((s, e) => s + e.credits, 0),
       }))
-      .filter((g) => g.credits > 0)
-      .sort((a, b) => b.credits - a.credits);
+      .filter((g) => g.credits > 0);
 
     const maxGroupCredits = groups.length > 0 ? groups[0].credits : 1;
     const now             = new Date();
@@ -1769,7 +2490,11 @@ export default function App() {
       notes,
       createdAt: Date.now(),
       ...(canvaLink.trim() ? { canvaLink: canvaLink.trim() } : {}),
-      ...(driveLink.trim() ? { driveLink: driveLink.trim() } : {}),
+      ...(driveLink.trim() || logAttachments[0]?.link
+        ? { driveLink: driveLink.trim() || logAttachments[0].link }
+        : {}),
+      ...(logAttachments.length > 0 ? { attachments: logAttachments } : {}),
+      ...(pendingLocalFiles.length > 0 ? { localFiles: pendingLocalFiles } : {}),
     };
     setIsLoading(true);
     try {
@@ -1779,6 +2504,8 @@ export default function App() {
       setNotes('');
       setCanvaLink('');
       setDriveLink('');
+      setLogAttachments([]);
+      setPendingLocalFiles([]);
       pushToSheetsWebhook(newEntry);
     } catch (e) {
       console.error(e);
@@ -1836,43 +2563,46 @@ export default function App() {
       .sort((a, b) => a.date.localeCompare(b.date));
   };
 
+  // ── TXT รายงาน LINE-friendly (ไม่ใช้ box-drawing chars)
   const handleExportTxt = () => {
     const filtered = buildExportRows(exportMonth, exportYear);
     if (filtered.length === 0) { showToast('ไม่มีข้อมูลในเดือนที่เลือก'); return; }
     const monthName    = getMonthNameThai(exportMonth);
     const yr           = exportYear;
     const totalCredits = filtered.reduce((s, e) => s + e.credits, 0);
+    const pct          = Math.round(safePercent(totalCredits, monthlyTarget));
     const role         = userProfile ? (ROLE_DEFAULTS[userProfile.role]?.meta.label || userProfile.role) : '';
-    let content = `╔══════════════════════════════════════════════════╗\n`;
-    content += `║        JATRACK KPI REPORT — ${monthName} ${yr}`.padEnd(51) + '║\n';
-    content += `╚══════════════════════════════════════════════════╝\n\n`;
-    content += `  Name   : ${displayName}\n`;
-    content += `  Role   : ${role}\n`;
-    content += `  Target : ${monthlyTarget} Credits/Month\n`;
-    content += `  Export : ${new Date().toLocaleString('th-TH')}\n\n`;
+    const bar          = '──────────────────────';
+    const dbl          = '══════════════════════';
 
-    // Group by group
+    let content = `📊 JATRACK KPI REPORT\n`;
+    content += `เดือน: ${monthName} ${yr}\n`;
+    content += `${bar}\n`;
+    content += `👤 ${displayName}  |  ${role}\n`;
+    content += `🎯 เป้าหมาย: ${monthlyTarget} Credits/เดือน\n`;
+    content += `📅 Export: ${new Date().toLocaleDateString('th-TH')}\n\n`;
+
     const groupKeys = [...new Set(filtered.map(e => e.groupId))] as string[];
     groupKeys.forEach(gKey => {
       const group     = kpiConfig[gKey];
       const groupRows = filtered.filter(e => e.groupId === gKey);
       const gTotal    = groupRows.reduce((s, e) => s + e.credits, 0);
-      content += `┌─ ${gKey} │ ${group?.name || gKey} ${'─'.repeat(Math.max(0,34 - (group?.name||gKey).length))}┐\n`;
+      content += `📁 ${group?.name || gKey}\n`;
       groupRows.forEach((e, idx) => {
         const task = group?.tasks.find(t => t.id === e.taskId);
-        content += `│  ${String(idx+1).padStart(2)}. [${e.date}] ${(task?.name||'Unknown').slice(0,28).padEnd(28)} │\n`;
-        content += `│      ${e.quantity} ${(task?.unit||'').padEnd(10)} × ${String(task?.creditPerUnit||1).padEnd(4)} Cr = ${String(e.credits).padStart(4)} Cr.  │\n`;
-        if (e.notes)     content += `│      ⌙ ${e.notes.slice(0,38).padEnd(38)}   │\n`;
-        if (e.canvaLink) content += `│      🔗 Canva: ${e.canvaLink.slice(0,32).padEnd(32)}   │\n`;
-        if (e.driveLink) content += `│      📁 Drive: ${e.driveLink.slice(0,32).padEnd(32)}   │\n`;
+        const dd   = e.date.slice(8) + '/' + e.date.slice(5,7);
+        content += `  ${idx+1}. [${dd}] ${task?.name || 'Unknown'}\n`;
+        content += `     ${e.quantity} ${task?.unit || ''} x ${task?.creditPerUnit || 1} Cr = ${e.credits} Cr\n`;
+        if (e.notes) content += `     💬 ${e.notes}\n`;
       });
-      content += `└${'─'.repeat(45)}─┘\n`;
-      content += `  Subtotal: ${gTotal} Credits\n\n`;
+      content += `  รวมกลุ่มนี้: ${gTotal} Credits\n\n`;
     });
-    content += `${'═'.repeat(50)}\n`;
-    content += `  GRAND TOTAL : ${totalCredits} / ${monthlyTarget} Credits (${Math.round(safePercent(totalCredits, monthlyTarget))}%)\n`;
-    content += `${'═'.repeat(50)}\n`;
-    content += `  Generated by Jatrack · Young Age Corporation Co., Ltd. & Pharvia 2025 Co., Ltd.\n`;
+
+    content += `${dbl}\n`;
+    content += `✅ รวมทั้งหมด: ${totalCredits} / ${monthlyTarget} Credits (${pct}%)\n`;
+    content += `${dbl}\n`;
+    content += `📱 Jatrack · Young Age & Pharvia\n`;
+
     const blob = new Blob(['\uFEFF' + content], { type: 'text/plain;charset=utf-8' });
     const link = document.createElement('a');
     link.href = URL.createObjectURL(blob);
@@ -1880,6 +2610,120 @@ export default function App() {
     link.click();
     showToast('ดาวน์โหลด TXT แล้ว ✓');
     setShowExportModal(false);
+  };
+
+  // ── Export to Google Sheets via Sheets API (สร้างใหม่ครั้งแรก / อัปเดตเสมอเมื่อข้อมูลใหม่)
+  const handleExportToGoogleSheets = async () => {
+    if (sheetsExporting) return;
+    const filtered = buildExportRows(summaryMonth, summaryYear);
+    if (filtered.length === 0) { showToast('ไม่มีข้อมูลในเดือนนี้'); return; }
+
+    const token = await ensureDriveAccessToken();
+    if (!token) return;
+
+    setSheetsExporting(true);
+    const monthName    = getMonthNameThai(summaryMonth);
+    const yr           = summaryYear;
+    const totalCredits = filtered.reduce((s, e) => s + e.credits, 0);
+    const pct          = Math.round(safePercent(totalCredits, monthlyTarget));
+    const sheetKey     = `sheet_id_${yr}_${summaryMonth}`;
+    const savedId      = currentUser ? localStorage.getItem(scopedKey(currentUser.uid, sheetKey)) : null;
+
+    showToast('⏳ กำลังสร้าง / อัปเดต Google Sheet...');
+
+    // Build values (reused for both new + existing)
+    const header = ['#', 'วันที่', 'กลุ่ม', 'Task ID', 'ชื่องาน', 'จำนวน', 'หน่วย', 'Cr/Unit', 'Credits', 'หมายเหตุ', 'Canva Link', 'Drive Link'];
+    const rows = filtered.map((e, idx) => {
+      const g = kpiConfig[e.groupId];
+      const t = g?.tasks.find(x => x.id === e.taskId);
+      return [idx + 1, e.date, g?.name || e.groupId, e.taskId, t?.name || '', e.quantity, t?.unit || '', t?.creditPerUnit || 1, e.credits, e.notes || '', e.canvaLink || '', e.driveLink || ''];
+    });
+    const summary = [[], [`รวมทั้งหมด`, totalCredits, `Cr`, `${pct}% ของเป้า ${monthlyTarget} Cr`]];
+    const values  = [
+      [`JATRACK KPI REPORT — ${displayName} — ${monthName} ${yr}`],
+      [`Export: ${new Date().toLocaleString('th-TH')}`],
+      [],
+      header,
+      ...rows,
+      ...summary,
+    ];
+
+    let spreadsheetId = savedId;
+    try {
+      if (!spreadsheetId) {
+        // สร้าง Spreadsheet ใหม่
+        const createRes = await fetch('https://sheets.googleapis.com/v4/spreadsheets', {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            properties: { title: `Jatrack KPI — ${displayName} ${monthName} ${yr}` },
+            sheets: [{ properties: { title: 'KPI Report' } }],
+          }),
+        });
+        if (!createRes.ok) throw new Error('create_failed');
+        const created = await createRes.json() as { spreadsheetId?: string };
+        spreadsheetId = created.spreadsheetId || null;
+        if (!spreadsheetId) throw new Error('no_id');
+
+        // บันทึก ID + URL ไว้
+        if (currentUser) {
+          localStorage.setItem(scopedKey(currentUser.uid, sheetKey), spreadsheetId);
+          const url = `https://docs.google.com/spreadsheets/d/${spreadsheetId}`;
+          localStorage.setItem(scopedKey(currentUser.uid, 'sheet_url'), url);
+          setSheetUrl(url);
+        }
+      }
+
+      // เขียน/อัปเดตข้อมูลเสมอ (ทั้งสร้างใหม่และเปิดซ้ำ)
+      await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/A1?valueInputOption=RAW`, {
+        method: 'PUT',
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ values }),
+      });
+      showToast(savedId ? `✅ อัปเดต Google Sheet แล้ว (${filtered.length} รายการ)` : '✅ สร้าง Google Sheet ใหม่แล้ว!');
+      window.open(`https://docs.google.com/spreadsheets/d/${spreadsheetId}`, '_blank');
+    } catch {
+      showToast('❌ สร้าง Google Sheet ไม่สำเร็จ — ตรวจสอบสิทธิ์ Spreadsheets API');
+    } finally {
+      setSheetsExporting(false);
+    }
+  };
+
+  // ── Gemini AI Summary
+  const handleGeminiSummary = async () => {
+    if (!geminiApiKey.trim()) { showToast('ใส่ Gemini API Key ใน Settings ก่อน'); return; }
+    setGeminiLoading(true);
+    setGeminiResult('');
+    setShowGemini(true);
+    try {
+      const monthName = getMonthNameThai(summaryMonth);
+      const role = userProfile ? (ROLE_DEFAULTS[userProfile.role]?.meta.label || userProfile.role) : '';
+      const groupLines = summaryData.groups.map(g =>
+        `  - ${g.name}: ${g.credits} Credits`
+      ).join('\n');
+      const prompt =
+        `คุณเป็น KPI Analyst ผู้เชี่ยวชาญ วิเคราะห์ผลการทำงาน KPI ต่อไปนี้และสรุปเป็น**ภาษาไทย** สั้น ชัด อ่านง่าย ใน 3-5 ประโยค:\n\n` +
+        `ชื่อ: ${displayName} | ตำแหน่ง: ${role}\n` +
+        `เดือน: ${monthName} ${summaryYear}\n` +
+        `ผลรวม: ${summaryData.totalCredits} / ${monthlyTarget} Credits (${Math.round(summaryData.percent)}%)\n` +
+        `จำนวนงาน: ${summaryData.entryCount} รายการ\n` +
+        `แยกตามกลุ่ม:\n${groupLines || '  (ยังไม่มีข้อมูล)'}`;
+
+      const res = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${geminiApiKey.trim()}`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] }),
+        }
+      );
+      const data = await res.json() as { candidates?: Array<{ content: { parts: Array<{ text: string }> } }> };
+      setGeminiResult(data.candidates?.[0]?.content?.parts?.[0]?.text || 'ไม่สามารถสรุปได้ในขณะนี้');
+    } catch {
+      setGeminiResult('❌ เชื่อมต่อ Gemini ไม่สำเร็จ ตรวจสอบ API Key และการเชื่อมต่ออินเทอร์เน็ต');
+    } finally {
+      setGeminiLoading(false);
+    }
   };
 
   const handleExportCsv = () => {
@@ -1997,7 +2841,7 @@ export default function App() {
 
   // ── Render guards
   if (authLoading || profileLoading) return <LoadingScreen />;
-  if (!currentUser) return <SignInScreen onSignIn={handleSignIn} loading={signInLoading} toast={toast} />;
+  if (!currentUser) return <SignInScreen onSignIn={handleSignIn} onEmailSignIn={handleEmailSignIn} onEmailRegister={handleEmailRegister} loading={signInLoading} toast={toast} />;
   if (!userProfile) return <LoadingScreen />;
   if (!userProfile.nickname?.trim()) {
     return (
@@ -2014,7 +2858,7 @@ export default function App() {
 
   // ─── MAIN APP ───────────────────────────────────────────────────────────────
   return (
-    <div className="flex flex-col h-[100dvh] max-w-md mx-auto bg-[#FDFAF7] text-[#2C2A28] relative overflow-hidden">
+    <div className="flex flex-col h-screen max-w-md mx-auto bg-[#FDFAF7] text-[#2C2A28] relative overflow-hidden" style={{ height: '100dvh' }}>
       <Toast {...toast} />
 
       {/* KPI Editor (Phase 5) */}
@@ -2081,32 +2925,42 @@ export default function App() {
                 className="w-full pl-10 pr-4 py-3 bg-slate-50 border border-slate-100 rounded-2xl text-[13px] outline-none"
               />
             </div>
+            {/* ไฟล์ที่อัปโหลดแล้ว (edit mode) */}
+            {editEntry.attachments && editEntry.attachments.length > 0 && (
+              <div className="flex flex-wrap gap-1.5">
+                {editEntry.attachments.map((att, i) => (
+                  <div key={i} className="flex items-center gap-1 bg-emerald-50 border border-emerald-100 rounded-lg px-2 py-1 max-w-full">
+                    <a href={att.link} target="_blank" rel="noopener noreferrer"
+                      className="text-[9px] font-bold text-emerald-700 truncate hover:underline" style={{ maxWidth: 150 }} title={att.normalizedName}>
+                      {att.normalizedName}
+                    </a>
+                    <button
+                      type="button"
+                      onClick={() => setEditEntry(prev => prev ? {
+                        ...prev,
+                        attachments: prev.attachments!.filter((_, j) => j !== i),
+                      } : prev)}
+                      className="text-emerald-400 hover:text-rose-400 ml-1 text-[11px] leading-none shrink-0"
+                    >×</button>
+                  </div>
+                ))}
+              </div>
+            )}
             <input
               ref={editDriveInputRef}
               type="file"
+              multiple
               className="hidden"
-              onChange={(e) => {
-                const file = e.target.files?.[0];
-                if (file) void handleDriveFileSelected(file, 'edit');
-                e.currentTarget.value = '';
-              }}
+              onChange={(e) => handleDriveFilesSelected(e, 'edit')}
             />
-            <div className="grid grid-cols-2 gap-2">
-              <button
-                onClick={() => editDriveInputRef.current?.click()}
-                disabled={driveUploadingEdit}
-                className={`py-3 bg-slate-50 border border-slate-200 rounded-2xl font-bold text-[11px] text-slate-500 flex items-center justify-center gap-1.5 active:bg-emerald-50 transition-colors ${driveUploadingEdit ? 'opacity-60' : ''}`}
-              >
-                {driveUploadingEdit ? <RefreshCw size={13} className="animate-spin" /> : <Upload size={13} />}
-                {driveUploadingEdit ? 'กำลังอัปโหลด...' : 'อัปโหลดเข้า Drive'}
-              </button>
-              <button
-                onClick={() => window.open('https://www.canva.com', '_blank')}
-                className="py-3 bg-slate-50 border border-slate-200 rounded-2xl font-bold text-[11px] text-slate-500 flex items-center justify-center gap-1.5 active:bg-purple-50 transition-colors"
-              >
-                <ExternalLink size={13} /> เปิด Canva
-              </button>
-            </div>
+            <button
+              onClick={() => editDriveInputRef.current?.click()}
+              disabled={driveUploadingEdit}
+              className={`w-full py-3 bg-slate-50 border border-slate-200 rounded-2xl font-bold text-[11px] text-slate-500 flex items-center justify-center gap-1.5 active:bg-emerald-50 transition-colors ${driveUploadingEdit ? 'opacity-60' : ''}`}
+            >
+              {driveUploadingEdit ? <RefreshCw size={13} className="animate-spin" /> : <Upload size={13} />}
+              {driveUploadingEdit ? 'กำลังอัปโหลด...' : 'อัปโหลดเข้า Drive'}
+            </button>
             <button
               onClick={handleUpdateEntry}
               className="w-full py-4 text-white rounded-2xl font-bold text-[13px] tracking-widest active:scale-95 transition-all glow-orange"
@@ -2266,6 +3120,21 @@ export default function App() {
             />
           </div>
 
+          {/* Custom title */}
+          <div className="space-y-1.5">
+            <label className="text-[10px] font-bold text-slate-400 tracking-widest uppercase">
+              ชื่อตำแหน่ง (แสดงบนแอพ)
+            </label>
+            <input
+              type="text"
+              value={customTitleDraft}
+              onChange={(e) => setCustomTitleDraft(e.target.value)}
+              maxLength={40}
+              className="w-full px-4 py-3.5 bg-slate-50 border border-slate-100 rounded-2xl text-[13px] font-bold outline-none"
+              placeholder={ROLE_DEFAULTS[userProfile?.role || '']?.meta.label || 'ตำแหน่งงาน...'}
+            />
+          </div>
+
           {/* Google Sheet URL */}
           <div className="space-y-1.5">
             <label className="text-[10px] font-bold text-slate-400 tracking-widest uppercase">Google Sheet URL</label>
@@ -2278,26 +3147,40 @@ export default function App() {
             />
           </div>
 
-          {/* Sheets Auto-Push Webhook */}
+          {/* Sheets Auto-Push — status for all / edit for admin */}
           <div className="space-y-1.5">
             <label className="text-[10px] font-bold text-slate-400 tracking-widest uppercase">
               Sheets Auto-Push <span className="font-normal normal-case">(Google Apps Script)</span>
             </label>
-            <input
-              type="text"
-              value={sheetsWebhookUrl}
-              onChange={(e) => setSheetsWebhookUrl(e.target.value)}
-              className="w-full px-4 py-3.5 bg-slate-50 border border-slate-100 rounded-2xl text-[12px] outline-none"
-              placeholder="https://script.google.com/macros/s/..."
-            />
-            <button
-              onClick={() => {
-                navigator.clipboard.writeText(GAS_TEMPLATE).then(() => showToast('คัดลอก GAS Template แล้ว ✓'));
-              }}
-              className="w-full py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-[11px] font-bold text-slate-500 flex items-center justify-center gap-1.5 active:bg-orange-50 transition-colors"
-            >
-              📋 Copy GAS Template (Apps Script)
-            </button>
+            {isSuperAdmin ? (
+              <>
+                <input
+                  type="text"
+                  value={sheetsWebhookUrl}
+                  onChange={(e) => setSheetsWebhookUrl(e.target.value)}
+                  className="w-full px-4 py-3.5 bg-slate-50 border border-slate-100 rounded-2xl text-[12px] outline-none"
+                  placeholder="https://script.google.com/macros/s/..."
+                />
+                <button
+                  onClick={() => {
+                    navigator.clipboard.writeText(GAS_TEMPLATE).then(() => showToast('คัดลอก GAS Template v3 แล้ว ✓'));
+                  }}
+                  className="w-full py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-[11px] font-bold text-slate-500 flex items-center justify-center gap-1.5 active:bg-orange-50 transition-colors"
+                >
+                  📋 Copy GAS Template v3 (Apps Script)
+                </button>
+              </>
+            ) : (
+              <div className={`px-4 py-3 rounded-2xl border flex items-center gap-2.5 ${sheetsWebhookUrl ? 'bg-emerald-50 border-emerald-100' : 'bg-slate-50 border-slate-100'}`}>
+                <span className="text-[15px]">{sheetsWebhookUrl ? '✅' : '⏸'}</span>
+                <div>
+                  <p className={`text-[11px] font-bold ${sheetsWebhookUrl ? 'text-emerald-700' : 'text-slate-500'}`}>
+                    {sheetsWebhookUrl ? 'เชื่อมต่อ Google Sheets แล้ว' : 'ยังไม่ได้ตั้งค่า Webhook'}
+                  </p>
+                  <p className="text-[9px] text-slate-400">ตั้งค่าโดย Admin · ไม่ต้องดำเนินการเพิ่มเติม</p>
+                </div>
+              </div>
+            )}
           </div>
 
           {/* Google Drive Attachment */}
@@ -2423,6 +3306,51 @@ export default function App() {
             <Sliders size={15} /> จัดการ KPI Config (Role ของฉัน)
           </button>
 
+          {/* Drive folder manager button */}
+          {driveFolderId.trim() && (
+            <button
+              onClick={() => setShowDriveTreeModal(true)}
+              className="w-full py-3.5 bg-slate-50 border border-slate-200 rounded-2xl font-bold text-[13px] text-[#2C2A28] flex items-center justify-center gap-2.5 active:bg-green-50 transition-colors"
+            >
+              <FolderOpen size={15} /> จัดการโฟลเดอร์ Drive
+            </button>
+          )}
+
+          {/* Gemini API Key */}
+          <div className="space-y-1.5">
+            <label className="text-[10px] font-bold tracking-widest uppercase" style={{ color: '#7C3AED' }}>
+              🤖 Gemini API Key (สำหรับ AI Summary)
+            </label>
+            <input
+              type="password"
+              value={geminiApiKey}
+              onChange={(e) => setGeminiApiKey(e.target.value)}
+              className="w-full px-4 py-3.5 bg-slate-50 border border-slate-100 rounded-2xl text-[12px] outline-none"
+              placeholder="AIza... (จาก Google AI Studio)"
+            />
+            <p className="text-[10px] text-slate-400">
+              รับฟรีที่ <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener noreferrer" className="underline text-violet-500">aistudio.google.com/apikey</a>
+            </p>
+          </div>
+
+          {/* ── Auto-hover toggle */}
+          <div className="flex items-center justify-between px-4 py-3 bg-slate-50 rounded-2xl border border-slate-100">
+            <div>
+              <p className="text-[12px] font-bold text-[#2C2A28]">แสดงงานอัตโนมัติเมื่อ hover</p>
+              <p className="text-[9px] text-slate-400">เลื่อนเมาส์บนกลุ่ม → งานแสดงทันที</p>
+            </div>
+            <button
+              onClick={() => setAutoHoverExpand(v => !v)}
+              className="relative w-11 h-6 rounded-full transition-colors duration-200 shrink-0"
+              style={{ background: autoHoverExpand ? '#F4823C' : '#E2E8F0' }}
+            >
+              <div
+                className="absolute top-1 w-4 h-4 bg-white rounded-full shadow transition-all duration-200"
+                style={{ left: autoHoverExpand ? '1.375rem' : '0.25rem' }}
+              />
+            </button>
+          </div>
+
           <div className="flex gap-3">
             <button
               onClick={handleSignOut}
@@ -2436,10 +3364,29 @@ export default function App() {
                 const ok = await handleSaveNickname(nicknameDraft);
                 if (!ok) return;
                 localStorage.setItem(scopedKey(currentUser.uid, 'sheet_url'), sheetUrl.trim());
-                localStorage.setItem(scopedKey(currentUser.uid, 'sheets_webhook'), sheetsWebhookUrl.trim());
-                localStorage.setItem(scopedKey(currentUser.uid, 'cal_y8'), calY8Url.trim());
-                localStorage.setItem(scopedKey(currentUser.uid, 'cal_pv'), calPvUrl.trim());
-                localStorage.setItem(scopedKey(currentUser.uid, 'drive_folder_id'), driveFolderId.trim());
+                // Only super admin can override the webhook URL
+                if (isSuperAdmin) {
+                  localStorage.setItem(scopedKey(currentUser.uid, 'sheets_webhook'), sheetsWebhookUrl.trim());
+                }
+                localStorage.setItem(scopedKey(currentUser.uid, 'gemini_api_key'), geminiApiKey.trim());
+                // ── Persist settings + customTitle to Firestore
+                try {
+                  const titleVal = customTitleDraft.trim() || null;
+                  await setDoc(doc(db, 'users', currentUser.uid), {
+                    customTitle: titleVal,
+                    settings: {
+                      autoHoverExpand,
+                      calY8Url:      calY8Url.trim(),
+                      calPvUrl:      calPvUrl.trim(),
+                      driveFolderId: driveFolderId.trim(),
+                      sheetUrl:      sheetUrl.trim(),
+                    },
+                    updatedAt: Date.now(),
+                  }, { merge: true });
+                  setUserProfile(prev => prev ? { ...prev, customTitle: titleVal || undefined,
+                    settings: { autoHoverExpand, calY8Url: calY8Url.trim(), calPvUrl: calPvUrl.trim(),
+                      driveFolderId: driveFolderId.trim(), sheetUrl: sheetUrl.trim() } } : prev);
+                } catch { /* non-critical */ }
                 setShowSettings(false);
                 showToast('บันทึก Config แล้ว');
               }}
@@ -2466,13 +3413,18 @@ export default function App() {
                 <Sparkles size={11} className="text-[#F4823C]" />
               </div>
               <p className="text-[9px] font-bold uppercase tracking-[0.3em] mt-0.5" style={{ color: '#F4823C' }}>
-                {ROLE_EMOJI[userProfile?.role || ''] || '⚙️'} {ROLE_DEFAULTS[userProfile?.role || '']?.meta.label || userProfile?.role || 'Custom'}
+                {ROLE_EMOJI[userProfile?.role || ''] || '⚙️'} {userProfile?.customTitle || customTitleDraft || ROLE_DEFAULTS[userProfile?.role || '']?.meta.label || userProfile?.role || 'Custom'}
               </p>
             </div>
           </div>
           <div className="flex gap-1.5 items-center">
-            <div className={`w-9 h-9 rounded-xl flex items-center justify-center border transition-colors ${isOnline ? 'bg-emerald-50/80 border-emerald-200/50 text-emerald-500' : 'bg-rose-50/80 border-rose-200/50 text-rose-400'}`}>
+            <div className={`relative w-9 h-9 rounded-xl flex items-center justify-center border transition-colors ${isOnline ? 'bg-emerald-50/80 border-emerald-200/50 text-emerald-500' : 'bg-rose-50/80 border-rose-200/50 text-rose-400'}`}>
               {isOnline ? <Wifi size={14} /> : <WifiOff size={14} />}
+              {syncQueueCount > 0 && (
+                <span className="absolute -top-1 -right-1 w-4 h-4 bg-amber-400 rounded-full flex items-center justify-center pointer-events-none">
+                  <span className="text-[8px] font-black text-white leading-none">{syncQueueCount > 9 ? '9+' : syncQueueCount}</span>
+                </span>
+              )}
             </div>
             <button
               onClick={() => setShowSettings(true)}
@@ -2483,37 +3435,24 @@ export default function App() {
           </div>
         </div>
 
-        <div className="grid grid-cols-3 gap-2">
-          <div className="bg-white/60 backdrop-blur-md p-3.5 rounded-[20px] border border-white/80">
-            <p className="text-[8px] font-bold text-[#F4823C] uppercase tracking-widest">Month</p>
-            <p className="text-[26px] font-light text-[#F4823C] leading-tight mt-0.5">{stats.monthTotal}</p>
-            <p className="text-[8px] text-slate-300 font-medium">credits</p>
+        <div className="grid grid-cols-2 gap-2">
+          <div className="bg-white/60 backdrop-blur-md px-4 py-3 rounded-[20px] border border-white/80">
+            <p className="text-[8px] font-bold text-[#F4823C] uppercase tracking-widest">เดือนนี้</p>
+            <p className="text-[28px] font-light text-[#F4823C] leading-tight mt-0.5">{stats.monthTotal}</p>
+            <p className="text-[8px] text-slate-300 font-medium">
+              {monthlyTarget > 0 ? `/ ${monthlyTarget} Cr. · ${Math.round(stats.percent)}%` : 'credits'}
+            </p>
           </div>
-          <div className="bg-white/60 backdrop-blur-md p-3.5 rounded-[20px] border border-white/80">
-            <p className="text-[8px] font-bold text-slate-400 uppercase tracking-widest">Target</p>
-            <p className="text-[26px] font-light text-[#2C2A28] leading-tight mt-0.5">{monthlyTarget}</p>
-            <p className="text-[8px] text-slate-300 font-medium">{Math.round(stats.percent)}%</p>
-          </div>
-          <div className="p-3.5 rounded-[20px] shadow-lg" style={{ background: 'linear-gradient(135deg, #F4823C, #F5A855)' }}>
-            <p className="text-[8px] font-bold text-white/70 uppercase tracking-widest">Today</p>
-            <p className="text-[26px] font-light text-white leading-tight mt-0.5">{stats.todayTotal}</p>
+          <div className="px-4 py-3 rounded-[20px] shadow-md" style={{ background: 'linear-gradient(135deg, #F4823C, #F5A855)' }}>
+            <p className="text-[8px] font-bold text-white/70 uppercase tracking-widest">วันนี้</p>
+            <p className="text-[28px] font-light text-white leading-tight mt-0.5">{stats.todayTotal}</p>
             <p className="text-[8px] text-white/60 font-medium">credits</p>
           </div>
-        </div>
-
-        <div className="mt-3 h-[3px] bg-white/40 rounded-full overflow-hidden">
-          <div
-            className="h-full rounded-full progress-bar"
-            style={{
-              width: `${stats.percent}%`,
-              background: stats.percent >= 100 ? '#34d399' : 'linear-gradient(90deg, #F4823C, #F5A855)',
-            }}
-          />
         </div>
       </header>
 
       {/* ─── MAIN CONTENT ───────────────────────────────────────────────────── */}
-      <main className="flex-1 overflow-y-auto overscroll-contain px-5 py-5 pb-[calc(6.5rem+env(safe-area-inset-bottom))]">
+      <main className="flex-1 overflow-y-auto px-5 py-5 pb-[calc(7rem+env(safe-area-inset-bottom))]" style={{ WebkitOverflowScrolling: 'touch' } as React.CSSProperties}>
 
         {/* LOG TAB */}
         {activeTab === 'log' && (
@@ -2536,45 +3475,91 @@ export default function App() {
                   />
                 </div>
 
-                {/* Group */}
-                <div className="space-y-1.5">
+                {/* Group + Task — Expand/Collapse with animation */}
+                <div className="space-y-2">
                   <label className="text-[9px] font-bold text-slate-400 uppercase tracking-widest">กลุ่มงาน</label>
-                  <div className="grid grid-cols-7 gap-1.5">
-                    {Object.keys(kpiConfig).map((key) => (
-                      <button
-                        key={key}
-                        onClick={() => {
-                          setSelectedGroup(key);
-                          setSelectedTaskId(kpiConfig[key].tasks[0]?.id || '');
-                        }}
-                        className={`h-10 rounded-[14px] font-black text-[11px] transition-all duration-200 ${
-                          selectedGroup === key
-                            ? 'bg-[#F4823C] text-white shadow-md scale-105 glow-orange'
-                            : 'bg-slate-50 text-slate-400 border border-slate-100'
-                        }`}
-                      >
-                        {key}
-                      </button>
-                    ))}
-                  </div>
-                </div>
+                  <div className="space-y-2">
+                    {orderedGroupKeys.map((key) => {
+                      const grp        = kpiConfig[key];
+                      const isActive   = selectedGroup === key;
+                      const isExpanded = expandedGroups.has(key) || (autoHoverExpand && hoveredGroup === key);
+                      const hasY8 = grp.brands?.includes('y8');
+                      const hasPv = grp.brands?.includes('pv');
+                      const brandLabel = hasY8 && hasPv ? 'Y8-PV' : hasY8 ? 'Y8' : hasPv ? 'PV' : null;
+                      const brandBg    = hasY8 && hasPv ? 'linear-gradient(90deg,#FEF3E2,#FDE8F2)' : hasY8 ? '#FEF3E2' : '#FDE8F2';
+                      const brandColor = hasY8 && hasPv ? '#9D5C1A' : hasY8 ? '#F4823C' : '#E87AA5';
+                      return (
+                        <div key={key}
+                          className="rounded-[16px] overflow-hidden border transition-all duration-200"
+                          style={{ borderColor: isActive ? grp.color : 'rgb(241 245 249)', background: isActive ? grp.bg : 'white' }}
+                          onMouseEnter={() => autoHoverExpand && setHoveredGroup(key)}
+                          onMouseLeave={() => autoHoverExpand && setHoveredGroup(null)}
+                        >
+                          {/* Group header — click = toggle expand + set selectedGroup */}
+                          <button className="w-full flex items-center gap-2 px-3 py-2.5 text-left"
+                            onClick={() => {
+                              setSelectedGroup(key);
+                              setSelectedTaskId(grp.tasks[0]?.id || '');
+                              setExpandedGroups(prev => {
+                                const s = new Set(prev);
+                                s.has(key) ? s.delete(key) : s.add(key);
+                                return s;
+                              });
+                            }}
+                          >
+                            <span className="w-7 h-7 rounded-xl flex items-center justify-center text-white text-[11px] font-black shrink-0"
+                              style={{ background: grp.color }}>
+                              {grp.icon || key.slice(0, 1)}
+                            </span>
+                            <div className="flex-1 min-w-0">
+                              <div className="flex items-center gap-1.5">
+                                <p className="text-[12px] font-bold text-[#2C2A28] truncate">{grp.name}</p>
+                                {brandLabel && (
+                                  <span className="text-[7px] px-1.5 py-0.5 rounded font-bold shrink-0"
+                                    style={{ background: brandBg, color: brandColor }}>
+                                    {brandLabel}
+                                  </span>
+                                )}
+                              </div>
+                              <p className="text-[9px] text-slate-400">{grp.tasks.length} งาน</p>
+                            </div>
+                            <ChevronDown size={14}
+                              className="text-slate-300 shrink-0 transition-transform duration-200"
+                              style={{ transform: isExpanded ? 'rotate(180deg)' : 'rotate(0deg)' }}
+                            />
+                          </button>
 
-                {/* Task */}
-                <div className="space-y-1.5">
-                  <label className="text-[9px] font-bold text-slate-400 uppercase tracking-widest">
-                    งาน — {kpiConfig[selectedGroup]?.name}
-                  </label>
-                  <div className="relative">
-                    <select
-                      value={selectedTaskId}
-                      onChange={(e) => setSelectedTaskId(e.target.value)}
-                      className="w-full px-4 py-3 bg-[#FDFAF7] border border-slate-200 rounded-xl font-semibold appearance-none outline-none text-[13px] text-[#2C2A28]"
-                    >
-                      {kpiConfig[selectedGroup]?.tasks.map((t) => (
-                        <option key={t.id} value={t.id}>[{t.id}] {t.name}</option>
-                      ))}
-                    </select>
-                    <ChevronDown size={15} className="absolute right-4 top-1/2 -translate-y-1/2 text-slate-300 pointer-events-none" />
+                          {/* Task list — smooth height animation */}
+                          <div style={{
+                            maxHeight: isExpanded ? `${grp.tasks.length * 80 + 60}px` : '0px',
+                            overflow: 'hidden',
+                            transition: 'max-height 0.35s cubic-bezier(0.4,0,0.2,1)',
+                          }}>
+                            <div className="px-3 pb-2.5 space-y-1.5 border-t" style={{ borderColor: `${grp.color}33` }}>
+                              <p className="text-[8px] font-bold text-slate-400 uppercase tracking-widest pt-2">เลือกงาน</p>
+                              {grp.tasks.map((t) => (
+                                <button key={t.id}
+                                  onClick={() => { setSelectedTaskId(t.id); setSelectedGroup(key); }}
+                                  className="w-full flex items-center justify-between px-3 py-2 rounded-xl transition-all text-left"
+                                  style={{
+                                    background: selectedTaskId === t.id && isActive ? grp.color : 'white',
+                                    color: selectedTaskId === t.id && isActive ? 'white' : '#2C2A28',
+                                    border: `1px solid ${selectedTaskId === t.id && isActive ? grp.color : 'rgb(241 245 249)'}`,
+                                  }}>
+                                  <div className="min-w-0">
+                                    <span className="text-[10px] font-black opacity-70 mr-1">[{t.id}]</span>
+                                    <span className="text-[12px] font-semibold">{t.name}</span>
+                                  </div>
+                                  <span className="shrink-0 text-[11px] font-black ml-2 opacity-80">
+                                    {t.creditPerUnit} Cr/{t.unit}
+                                  </span>
+                                </button>
+                              ))}
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })}
                   </div>
                 </div>
 
@@ -2623,41 +3608,52 @@ export default function App() {
                   />
                 </div>
 
-                {/* Canva & Drive Links */}
+                {/* Attachments */}
                 <div className="space-y-2">
                   <label className="text-[9px] font-bold text-slate-400 uppercase tracking-widest">
-                    แนบลิงก์ <span className="normal-case font-normal">(ไม่บังคับ)</span>
+                    📎 แนบงาน <span className="normal-case font-normal opacity-60">(ไม่บังคับ)</span>
                   </label>
+
+                  {/* Canva link */}
                   <div className="relative">
-                    <span className="absolute left-3.5 top-1/2 -translate-y-1/2 text-[10px] font-black text-white px-1.5 py-0.5 rounded-md pointer-events-none" style={{ background: '#7C3AED' }}>C</span>
+                    <span className="absolute left-3 top-1/2 -translate-y-1/2 text-[9px] font-black text-white px-1.5 py-0.5 rounded pointer-events-none" style={{ background: '#7C3AED' }}>C</span>
                     <input
                       type="url"
                       value={canvaLink}
                       onChange={(e) => setCanvaLink(e.target.value)}
                       placeholder="Canva link..."
-                      className="w-full pl-10 pr-4 py-2.5 bg-[#FDFAF7] border border-slate-200 rounded-xl text-[13px] outline-none text-[#2C2A28] placeholder:text-slate-300"
+                      className="w-full pl-9 pr-4 py-2.5 bg-[#FDFAF7] border border-slate-200 rounded-xl text-[13px] outline-none text-[#2C2A28] placeholder:text-slate-300"
                     />
                   </div>
+
+                  {/* Drive link */}
                   <div className="relative">
-                    <span className="absolute left-3.5 top-1/2 -translate-y-1/2 text-[10px] font-black text-white px-1.5 py-0.5 rounded-md pointer-events-none" style={{ background: '#1D6F42' }}>D</span>
+                    <span className="absolute left-3 top-1/2 -translate-y-1/2 text-[9px] font-black text-white px-1.5 py-0.5 rounded pointer-events-none" style={{ background: '#1D6F42' }}>D</span>
                     <input
                       type="url"
                       value={driveLink}
                       onChange={(e) => setDriveLink(e.target.value)}
                       placeholder="Google Drive link..."
-                      className="w-full pl-10 pr-4 py-2.5 bg-[#FDFAF7] border border-slate-200 rounded-xl text-[13px] outline-none text-[#2C2A28] placeholder:text-slate-300"
+                      className="w-full pl-9 pr-4 py-2.5 bg-[#FDFAF7] border border-slate-200 rounded-xl text-[13px] outline-none text-[#2C2A28] placeholder:text-slate-300"
                     />
                   </div>
-                  <input
-                    ref={logDriveInputRef}
-                    type="file"
-                    className="hidden"
-                    onChange={(e) => {
-                      const file = e.target.files?.[0];
-                      if (file) void handleDriveFileSelected(file, 'log');
-                      e.currentTarget.value = '';
-                    }}
-                  />
+
+                  {/* Uploaded Drive file chips */}
+                  {logAttachments.length > 0 && (
+                    <div className="flex flex-wrap gap-1.5">
+                      {logAttachments.map((att, i) => (
+                        <div key={i} className="flex items-center gap-1 bg-emerald-50 border border-emerald-100 rounded-lg px-2 py-1 max-w-full">
+                          <span className="text-[9px] font-bold text-emerald-700 truncate" style={{ maxWidth: 160 }} title={att.normalizedName}>
+                            {att.normalizedName}
+                          </span>
+                          <button type="button" onClick={() => setLogAttachments(prev => prev.filter((_, j) => j !== i))} className="text-emerald-300 active:text-rose-400 ml-1 text-[12px] leading-none shrink-0">×</button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+
+                  {/* Action buttons — single row */}
+                  <input ref={logDriveInputRef} type="file" multiple className="hidden" onChange={(e) => handleDriveFilesSelected(e, 'log')} />
                   <div className="grid grid-cols-2 gap-2">
                     <button
                       onClick={() => logDriveInputRef.current?.click()}
@@ -2665,15 +3661,28 @@ export default function App() {
                       className={`py-2.5 bg-[#FDFAF7] border border-slate-200 rounded-xl text-[11px] font-bold text-slate-500 flex items-center justify-center gap-1.5 active:bg-emerald-50 transition-colors ${driveUploading ? 'opacity-60' : ''}`}
                     >
                       {driveUploading ? <RefreshCw size={13} className="animate-spin" /> : <Upload size={13} />}
-                      {driveUploading ? 'กำลังอัปโหลด...' : 'อัปโหลดเข้า Drive'}
+                      {driveUploading ? 'กำลังอัปโหลด...' : 'อัปโหลด Drive'}
                     </button>
                     <button
-                      onClick={() => window.open('https://www.canva.com', '_blank')}
-                      className="py-2.5 bg-[#FDFAF7] border border-slate-200 rounded-xl text-[11px] font-bold text-slate-500 flex items-center justify-center gap-1.5 active:bg-purple-50 transition-colors"
+                      onClick={() => { void handlePickLocalFile(); }}
+                      className="py-2.5 bg-[#FDFAF7] border border-slate-200 rounded-xl text-[11px] font-bold text-slate-500 flex items-center justify-center gap-1.5 active:bg-teal-50 transition-colors"
                     >
-                      <ExternalLink size={13} /> เปิด Canva
+                      <FileText size={13} /> ไฟล์ในเครื่อง
                     </button>
                   </div>
+
+                  {/* Pending local file chips */}
+                  {pendingLocalFiles.length > 0 && (
+                    <div className="flex flex-wrap gap-1.5">
+                      {pendingLocalFiles.map((lf, i) => (
+                        <div key={i} className="flex items-center gap-1 bg-teal-50 border border-teal-100 rounded-lg px-2 py-1 max-w-full">
+                          {lf.thumbnail && <img src={lf.thumbnail} className="w-4 h-4 rounded object-cover shrink-0" alt="" />}
+                          <span className="text-[9px] font-bold text-teal-700 truncate" style={{ maxWidth: 120 }} title={lf.name}>{lf.name}</span>
+                          <button type="button" onClick={() => setPendingLocalFiles(prev => prev.filter((_, j) => j !== i))} className="text-teal-300 active:text-rose-400 ml-1 text-[12px] leading-none shrink-0">×</button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
                 </div>
 
                 <button
@@ -2692,12 +3701,9 @@ export default function App() {
         {/* TODAY TAB */}
         {activeTab === 'today' && (
           <div className="space-y-3.5 animate-in fade-in slide-in-from-bottom-2 duration-300">
-            <div className="flex justify-between items-center px-1">
-              <p className="text-[10px] font-bold text-slate-400 uppercase tracking-[0.25em]">
-                วันนี้ · {formatThaiDate(getTodayStr(), true)}
-              </p>
-              <span className="text-[13px] font-bold text-[#F4823C]">{stats.todayTotal} Cr.</span>
-            </div>
+            <p className="text-[10px] font-bold text-slate-400 uppercase tracking-[0.25em] px-1">
+              {formatThaiDate(getTodayStr(), true)}
+            </p>
             {todayEntries.length === 0 ? (
               <div className="text-center py-16 bg-white rounded-[24px] border border-dashed border-slate-200">
                 <Clock size={26} className="text-slate-200 mx-auto mb-3" />
@@ -2706,7 +3712,7 @@ export default function App() {
             ) : (
               <div className="space-y-2.5">
                 {todayEntries.map((e) => (
-                  <EntryCard key={e.id} entry={e} workGroups={kpiConfig} onEdit={setEditEntry} onDelete={setDeleteId} />
+                  <EntryCard key={e.id} entry={e} workGroups={kpiConfig} onEdit={setEditEntry} onDelete={setDeleteId} onShowToast={showToast} />
                 ))}
               </div>
             )}
@@ -2785,7 +3791,7 @@ export default function App() {
                       <span className="text-[11px] font-bold text-[#F4823C]">{dayTotal} Cr.</span>
                     </div>
                     {dayEntries.map((e) => (
-                      <EntryCard key={e.id} entry={e} workGroups={kpiConfig} onEdit={setEditEntry} onDelete={setDeleteId} />
+                      <EntryCard key={e.id} entry={e} workGroups={kpiConfig} onEdit={setEditEntry} onDelete={setDeleteId} onShowToast={showToast} />
                     ))}
                   </div>
                 );
@@ -2906,11 +3912,23 @@ export default function App() {
             {/* Actions */}
             <div className="grid grid-cols-3 gap-2.5">
               <button
-                onClick={() => { if (sheetUrl) window.open(sheetUrl, '_blank'); else showToast('ไม่พบลิงก์ชีท'); }}
+                onClick={() => void handleExportToGoogleSheets()}
+                disabled={sheetsExporting}
+                className="py-5 bg-white rounded-[20px] shadow-sm border border-slate-100 flex flex-col items-center justify-center gap-2 active:scale-95 transition-all disabled:opacity-60"
+              >
+                {sheetsExporting
+                  ? <RefreshCw size={18} className="animate-spin text-emerald-400" />
+                  : <FileText size={18} className="text-emerald-500" />}
+                <span className="font-bold text-[9px] tracking-widest text-[#2C2A28] uppercase">
+                  {sheetsExporting ? 'กำลังส่ง...' : 'Google Sheet'}
+                </span>
+              </button>
+              <button
+                onClick={() => void handleGeminiSummary()}
                 className="py-5 bg-white rounded-[20px] shadow-sm border border-slate-100 flex flex-col items-center justify-center gap-2 active:scale-95 transition-all"
               >
-                <FileText size={18} className="text-emerald-500" />
-                <span className="font-bold text-[9px] tracking-widest text-[#2C2A28] uppercase">Google Sheet</span>
+                <Sparkles size={18} className={geminiLoading ? 'animate-spin text-violet-400' : 'text-violet-500'} />
+                <span className="font-bold text-[9px] tracking-widest text-[#2C2A28] uppercase">Gemini AI</span>
               </button>
               <button
                 onClick={() => setShowExportModal(true)}
@@ -2919,15 +3937,38 @@ export default function App() {
                 <Download size={18} className="text-sky-500" />
                 <span className="font-bold text-[9px] tracking-widest text-[#2C2A28] uppercase">Export</span>
               </button>
-              <button
-                className={`py-5 bg-white rounded-[20px] shadow-sm border border-slate-100 flex flex-col items-center justify-center gap-2 ${isOnline ? 'text-emerald-500' : 'text-rose-400'}`}
-              >
-                {isOnline ? <Wifi size={18} /> : <WifiOff size={18} />}
-                <span className="font-bold text-[9px] tracking-widest text-[#2C2A28] uppercase">
-                  {isOnline ? 'Online' : 'Offline'}
-                </span>
-              </button>
             </div>
+
+            {/* Gemini AI Result Panel */}
+            {showGemini && (
+              <section className="bg-white p-5 rounded-[24px] border border-violet-100 shadow-sm animate-in fade-in duration-300">
+                <div className="flex items-center justify-between mb-3">
+                  <div className="flex items-center gap-2">
+                    <Sparkles size={14} className="text-violet-500" />
+                    <p className="text-[10px] font-bold text-violet-600 uppercase tracking-widest">Gemini AI Summary</p>
+                  </div>
+                  <button onClick={() => setShowGemini(false)} className="text-slate-300 hover:text-slate-500">
+                    <X size={16} />
+                  </button>
+                </div>
+                {geminiLoading ? (
+                  <div className="flex items-center gap-2 text-slate-400 text-[12px]">
+                    <RefreshCw size={14} className="animate-spin" />
+                    กำลังวิเคราะห์...
+                  </div>
+                ) : (
+                  <p className="text-[13px] text-[#2C2A28] leading-relaxed whitespace-pre-wrap">{geminiResult}</p>
+                )}
+                {!geminiLoading && geminiResult && (
+                  <button
+                    onClick={() => { void navigator.clipboard.writeText(geminiResult); showToast('คัดลอกแล้ว ✓'); }}
+                    className="mt-3 w-full py-2 bg-violet-50 rounded-xl text-[11px] font-bold text-violet-600 active:bg-violet-100 transition-colors"
+                  >
+                    📋 คัดลอกข้อความ
+                  </button>
+                )}
+              </section>
+            )}
           </div>
         )}
 
@@ -2936,9 +3977,9 @@ export default function App() {
           <div className="space-y-3.5 animate-in fade-in slide-in-from-bottom-2 duration-300">
             <section className="bg-white p-5 rounded-[24px] border border-slate-100 shadow-sm">
               <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1">Admin Overview</p>
-              <p className="text-[20px] font-light text-[#2C2A28]">{adminSummary.length} Users Active เดือนนี้</p>
+              <p className="text-[20px] font-light text-[#2C2A28]">{adminProfiles.length} Users ทั้งหมด</p>
               <p className="text-[11px] text-slate-400 mt-1">
-                รวม {adminEntries.length} รายการทั้งหมด · ผู้ใช้งานทั้งหมด {adminProfiles.length} คน
+                Active เดือนนี้ {adminSummary.length} คน · รวม {adminEntries.length} รายการ
               </p>
             </section>
 
@@ -2946,34 +3987,230 @@ export default function App() {
               <div className="text-center py-10 text-slate-300 text-[11px] font-bold uppercase tracking-widest">
                 กำลังโหลดข้อมูลรวม...
               </div>
-            ) : adminSummary.length === 0 ? (
+            ) : adminProfiles.length === 0 ? (
               <div className="text-center py-12 bg-white rounded-[24px] border border-dashed border-slate-200">
                 <UserCircle size={26} className="text-slate-200 mx-auto mb-3" />
-                <p className="text-slate-300 text-[11px] font-bold uppercase tracking-widest">ยังไม่มีข้อมูลเดือนนี้</p>
+                <p className="text-slate-300 text-[11px] font-bold uppercase tracking-widest">ยังไม่มีผู้ใช้ในระบบ</p>
               </div>
             ) : (
               <div className="space-y-2.5">
-                {adminSummary.map((row, idx) => (
-                  <div key={row.uid} className="bg-white px-4 py-3.5 rounded-[18px] border border-slate-100 shadow-sm">
-                    <div className="flex items-center justify-between">
-                      <div>
-                        <p className="text-[13px] font-bold text-[#2C2A28]">{idx + 1}. {row.nickname}</p>
-                        <p className="text-[10px] text-slate-400">
-                          {ROLE_EMOJI[row.role] || '⚙️'} {ROLE_DEFAULTS[row.role]?.meta.label || row.role}
-                        </p>
-                      </div>
-                      <div className="text-right">
-                        <p className="text-[14px] font-bold text-[#F4823C]">{row.credits} Cr.</p>
-                        <p className="text-[9px] text-slate-300">{row.count} รายการ · Target {row.target} ({row.percent}%)</p>
+                {adminProfiles.map((profile, idx) => {
+                  const summary = adminSummary.find(r => r.uid === profile.uid);
+                  const isSelf  = profile.uid === currentUser?.uid;
+                  return (
+                    <div key={profile.uid} className="bg-white px-4 py-3.5 rounded-[18px] border border-slate-100 shadow-sm">
+                      <div className="flex items-center justify-between gap-2">
+                        <div className="flex-1 min-w-0">
+                          <p className="text-[13px] font-bold text-[#2C2A28] truncate">
+                            {idx + 1}. {profile.nickname || profile.displayName || profile.email}
+                            {isSelf && <span className="ml-1.5 text-[9px] font-bold text-[#F4823C] bg-orange-50 px-1.5 py-0.5 rounded-full">YOU</span>}
+                          </p>
+                          <p className="text-[10px] text-slate-400">
+                            {ROLE_EMOJI[profile.role] || '⚙️'} {ROLE_DEFAULTS[profile.role]?.meta.label || profile.role}
+                          </p>
+                        </div>
+                        <div className="flex items-center gap-2 shrink-0">
+                          <div className="text-right">
+                            <p className="text-[14px] font-bold text-[#F4823C]">{summary?.credits ?? 0} Cr.</p>
+                            <p className="text-[9px] text-slate-300">
+                              {summary ? `${summary.count} รายการ · ${summary.percent}%` : 'ไม่มีข้อมูลเดือนนี้'}
+                            </p>
+                          </div>
+                          {/* Delete button — hidden for self */}
+                          {!isSelf && (
+                            <button
+                              onClick={() => void handleDeleteAdminUser(profile.uid, profile.nickname || profile.displayName || profile.email)}
+                              className="w-8 h-8 flex items-center justify-center rounded-xl bg-rose-50 text-rose-400 active:bg-rose-100 transition-colors shrink-0"
+                              title="ลบผู้ใช้"
+                            >
+                              <Trash2 size={13} />
+                            </button>
+                          )}
+                        </div>
                       </div>
                     </div>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             )}
           </div>
         )}
       </main>
+
+      {/* ─── RENAME BEFORE UPLOAD MODAL ──────────────────────────────────────── */}
+      {showRenameModal && (() => {
+        // Duplicate detection: existing attachments + within-batch
+        const curMode  = pendingUploads[0]?.mode;
+        const alreadyUploaded = new Set<string>(
+          curMode === 'log'
+            ? logAttachments.map(a => a.normalizedName)
+            : (editEntry?.attachments ?? []).map(a => a.normalizedName)
+        );
+        const batchNames = pendingUploads.map(p => p.normalizedName);
+        const isDup = (name: string, idx: number) =>
+          alreadyUploaded.has(name) ||
+          batchNames.some((n, j) => n === name && j !== idx);
+        const anyDup = pendingUploads.some((p, i) => isDup(p.normalizedName, i));
+        return (
+          <div className="fixed inset-0 z-[90] bg-black/50 flex items-end justify-center p-4 animate-in fade-in duration-200">
+            <div className="bg-[#FDFAF7] rounded-[28px] w-full max-w-md shadow-2xl flex flex-col" style={{ maxHeight: '80dvh' }}>
+              {/* Header */}
+              <div className="px-5 pt-5 pb-4 border-b border-slate-100">
+                <p className="font-bold text-[#2C2A28] text-[15px]">ตรวจสอบชื่อไฟล์ก่อนอัปโหลด</p>
+                <p className="text-[10px] text-slate-400 mt-0.5">
+                  {pendingUploads.length} ไฟล์ · แก้ชื่อได้ก่อนยืนยัน
+                  {anyDup && <span className="text-amber-500 ml-1.5 font-bold">· ⚠️ พบชื่อซ้ำ</span>}
+                </p>
+              </div>
+              {/* File list */}
+              <div className="overflow-y-auto flex-1 px-4 py-3 space-y-3">
+                {pendingUploads.map((pf, i) => {
+                  const dup = isDup(pf.normalizedName, i);
+                  return (
+                    <div key={i} className={`rounded-[16px] border p-3 space-y-1.5 transition-colors ${dup ? 'bg-amber-50/40 border-amber-200' : 'bg-white border-slate-100'}`}>
+                      <div className="flex items-center gap-2">
+                        <p className="text-[9px] text-slate-400 truncate flex-1">ต้นฉบับ: {pf.file.name}</p>
+                        {dup && (
+                          <span className="shrink-0 text-[8px] font-bold px-1.5 py-0.5 rounded bg-amber-100 text-amber-600">
+                            ⚠️ ชื่อซ้ำ
+                          </span>
+                        )}
+                      </div>
+                      <input
+                        value={pf.normalizedName}
+                        onChange={(e) => {
+                          const updated = [...pendingUploads];
+                          updated[i] = { ...updated[i], normalizedName: e.target.value };
+                          setPendingUploads(updated);
+                        }}
+                        className={`w-full px-3 py-2 bg-slate-50 border rounded-xl text-[12px] font-mono outline-none transition-colors ${dup ? 'border-amber-300 focus:border-amber-500' : 'border-slate-100 focus:border-[#F4823C]'}`}
+                      />
+                      <p className="text-[8px] text-slate-300">
+                        {(pf.file.size / 1024).toFixed(0)} KB · {pf.file.type || 'unknown'}
+                      </p>
+                    </div>
+                  );
+                })}
+              </div>
+              {/* Actions */}
+              <div className="px-4 pb-[calc(1rem+env(safe-area-inset-bottom))] pt-3 space-y-2 border-t border-slate-100">
+                {/* Skip rename — upload with original filenames */}
+                <button
+                  onClick={() => void handleConfirmUploads(pendingUploads.map(p => ({ ...p, normalizedName: p.file.name })))}
+                  className="w-full py-2.5 rounded-2xl bg-slate-50 border border-slate-200 text-[12px] font-bold text-slate-500 active:bg-slate-100 transition-colors"
+                >
+                  📎 อัปโหลดด้วยชื่อเดิม (ข้ามการตั้งชื่อ)
+                </button>
+                {/* Cancel + Confirm */}
+                <div className="flex gap-2.5">
+                  <button
+                    onClick={() => { setShowRenameModal(false); setPendingUploads([]); }}
+                    className="flex-1 py-3.5 rounded-2xl bg-slate-100 text-[13px] font-bold text-slate-500 active:bg-slate-200 transition-colors"
+                  >
+                    ยกเลิก
+                  </button>
+                  <button
+                    onClick={() => void handleConfirmUploads()}
+                    className="flex-1 py-3.5 rounded-2xl text-white text-[13px] font-bold active:opacity-80 transition-opacity"
+                    style={{ background: 'linear-gradient(135deg, #1D6F42, #2E9B5E)' }}
+                  >
+                    ✅ ยืนยัน · อัปโหลด {pendingUploads.length} ไฟล์
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
+      {/* ─── DRIVE FOLDER TREE MODAL ────────────────────────────────────────── */}
+      <Modal isOpen={showDriveTreeModal} onClose={() => setShowDriveTreeModal(false)} title="📁 โครงสร้างโฟลเดอร์ Drive">
+        <div className="px-6 pb-8 space-y-4 overflow-y-auto">
+          <p className="text-[11px] text-slate-400">โครงสร้างโฟลเดอร์ใน Google Drive — ไฟล์ที่อัปโหลดจะถูกจัดเรียงตามกลุ่มงาน/แบรนด์/เดือนโดยอัตโนมัติ:</p>
+
+          {/* Tree preview */}
+          <div className="bg-slate-50 rounded-2xl p-4 font-mono text-[11px] space-y-1 overflow-x-auto">
+            <p className="font-bold text-[#2C2A28]">📁 Drive Root</p>
+            {orderedGroupKeys.map((key, i) => {
+              const grp    = kpiConfig[key];
+              const isLast = i === orderedGroupKeys.length - 1;
+              const hasY8  = grp.brands?.includes('y8');
+              const hasPv  = grp.brands?.includes('pv');
+              const singleBrand = (hasY8 && !hasPv) ? 'Y8' : (!hasY8 && hasPv) ? 'PV' : null;
+              // When single brand: Root → Group → Brand → YYYY-MM
+              // When multi/no brand: Root → Group → YYYY-MM
+              const monthExample = `${new Date().getFullYear()}-${String(new Date().getMonth() + 1).padStart(2, '0')}`;
+              return (
+                <div key={key} className="ml-3">
+                  <p className="text-slate-600">{isLast ? '└──' : '├──'} 📁 {grp.name}</p>
+                  {singleBrand ? (
+                    // Single brand: Group → Brand → YYYY-MM
+                    <div className="ml-6">
+                      <p className="text-slate-500">└── 📁 {singleBrand}</p>
+                      <div className="ml-6">
+                        <p className="text-slate-400">└── 📁 {monthExample} <span className="text-slate-300">(สร้างอัตโนมัติเมื่ออัปโหลด)</span></p>
+                      </div>
+                    </div>
+                  ) : (
+                    // Multi/no brand: Group → YYYY-MM (+ show brand folders if both)
+                    <>
+                      {hasY8 && <p className="ml-6 text-slate-500">{hasPv ? '├──' : '└──'} 📁 Y8</p>}
+                      {hasPv && <p className="ml-6 text-slate-500">├── 📁 PV</p>}
+                      <div className="ml-6">
+                        <p className="text-slate-400">{(hasY8 || hasPv) ? '└──' : '└──'} 📁 {monthExample} <span className="text-slate-300">(สร้างอัตโนมัติเมื่ออัปโหลด)</span></p>
+                      </div>
+                    </>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+
+          {/* Info note */}
+          <div className="space-y-2">
+            <div className="bg-sky-50 border border-sky-100 rounded-xl p-3 text-[10px] text-sky-700 leading-relaxed">
+              ℹ️ ไฟล์ที่อัปโหลดจะถูกจัดเก็บตาม: <strong>กลุ่มงาน → แบรนด์ (ถ้ามีแบรนด์เดียว) → เดือน (YYYY-MM)</strong>
+            </div>
+            <div className="bg-amber-50 border border-amber-100 rounded-xl p-3 text-[10px] text-amber-700 leading-relaxed">
+              ⚠️ ปุ่มยืนยันด้านล่างสร้างโครงสร้างหลักผ่าน GAS — โฟลเดอร์ YYYY-MM จะสร้างอัตโนมัติตอนอัปโหลดไฟล์ โฟลเดอร์เดิมและไฟล์จะไม่ถูกลบ
+            </div>
+          </div>
+
+          {/* Confirm button */}
+          <button
+            disabled={driveTreeLoading}
+            onClick={async () => {
+              setDriveTreeLoading(true);
+              try {
+                await fetch(sheetsWebhookUrl, {
+                  method: 'POST',
+                  mode: 'no-cors',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({
+                    action: 'sync_drive_folders',
+                    rootFolderId: driveFolderId.trim(),
+                    groups: orderedGroupKeys.map(k => ({
+                      key: k,
+                      name: kpiConfig[k].name,
+                      brands: kpiConfig[k].brands || [],
+                      icon: kpiConfig[k].icon || k,
+                    })),
+                  }),
+                });
+                showToast('ส่งคำสั่งสร้างโฟลเดอร์ไปยัง GAS แล้ว ✓');
+                setShowDriveTreeModal(false);
+              } catch {
+                showToast('เกิดข้อผิดพลาด กรุณาลองใหม่');
+              }
+              setDriveTreeLoading(false);
+            }}
+            className="w-full py-4 text-white rounded-2xl font-bold text-[13px] glow-orange disabled:opacity-60 transition-opacity active:opacity-80"
+            style={{ background: 'linear-gradient(135deg, #1D6F42, #2EA84B)' }}
+          >
+            {driveTreeLoading ? 'กำลังส่ง...' : '✅ ยืนยันสร้าง/อัปเดตโฟลเดอร์'}
+          </button>
+        </div>
+      </Modal>
 
       {/* ─── BOTTOM NAV ─────────────────────────────────────────────────────── */}
       <nav className="fixed bottom-0 left-0 right-0 max-w-md mx-auto bg-white/95 backdrop-blur-xl border-t border-slate-100/80 z-[60] shadow-2xl flex flex-col items-center">
