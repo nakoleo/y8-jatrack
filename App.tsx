@@ -15,7 +15,9 @@ import {
 import {
   signInWithPopup, signOut, onAuthStateChanged, type User,
   reauthenticateWithPopup, GoogleAuthProvider,
-  createUserWithEmailAndPassword, signInWithEmailAndPassword,
+  signInWithEmailAndPassword, fetchSignInMethodsForEmail,
+  linkWithCredential, EmailAuthProvider, updatePassword,
+  reauthenticateWithCredential,
 } from 'firebase/auth';
 import { db, auth, googleProvider, createDriveProvider, firebaseApp } from './firebase';
 import { WORK_GROUPS } from './constants';
@@ -70,16 +72,20 @@ const getBrandChipStyle = (brands?: BrandId[] | null) => {
   const hasY8 = normalized.includes('y8');
   const hasPv = normalized.includes('pv');
   return {
-    bg: hasY8 && hasPv ? 'linear-gradient(90deg,#FEF3E2,#FDE8F2)' : hasY8 ? '#FEF3E2' : '#FDE8F2',
+    background: hasY8 && hasPv ? 'linear-gradient(90deg,#FEF3E2,#FDE8F2)' : hasY8 ? '#FEF3E2' : '#FDE8F2',
     color: hasY8 && hasPv ? '#9D5C1A' : hasY8 ? '#F4823C' : '#E87AA5',
   };
 };
 
 const getTaskBrands = (task?: Partial<Task> | null, group?: Partial<WorkGroup> | null): BrandId[] => {
-  const taskBrands = normalizeBrands(task?.brands as BrandId[] | undefined);
-  if (taskBrands.length > 0) return taskBrands;
+  if (task && Array.isArray(task.brands)) {
+    return normalizeBrands(task.brands as BrandId[]);
+  }
   return normalizeBrands(group?.brands as BrandId[] | undefined);
 };
+
+const getEntryBrands = (entry: Partial<WorkEntry>, group?: Partial<WorkGroup> | null, task?: Partial<Task> | null) =>
+  Array.isArray(entry.brands) ? normalizeBrands(entry.brands) : getTaskBrands(task, group);
 
 const matchesBrandMode = (brands: BrandId[], mode: BrandMode) =>
   mode === 'all' || brands.includes(mode);
@@ -153,6 +159,14 @@ const buildSheetNames = (nickname: string, uid?: string) => {
     masterSheetName: `${ownerKey}_KPI_MASTER`,
     dashboardSheetName: `${ownerKey}_Dashboard`,
   };
+};
+
+const DEFAULT_USER_SETTINGS: StoredUserSettings = {
+  autoHoverExpand: false,
+  calY8Url: '',
+  calPvUrl: '',
+  driveFolderId: '',
+  sheetUrl: '',
 };
 
 const getInitialKpiForEmail = (email?: string | null) => {
@@ -265,17 +279,41 @@ interface PendingUploadFile {
   mode: 'log' | 'edit';
 }
 
+interface StoredUserSettings {
+  autoHoverExpand: boolean;
+  calY8Url: string;
+  calPvUrl: string;
+  driveFolderId: string;
+  sheetUrl: string;
+}
+
+type WebhookAction = 'upsert_entry' | 'delete_entry' | 'delete_user' | 'sync_drive_folders';
+
+interface SheetsWebhookPayload extends Record<string, unknown> {
+  action: WebhookAction;
+}
+
+interface SheetsWebhookResponse {
+  ok: boolean;
+  error?: string;
+  version?: string;
+  created?: string[];
+}
+
+type FileHandleWithPermission = FileSystemFileHandle & {
+  requestPermission?: (descriptor?: { mode?: 'read' | 'readwrite' }) => Promise<PermissionState>;
+};
+
 // GAS Webhook URL — pre-configured so users don't need to enter it manually
 const DEFAULT_GAS_WEBHOOK = 'https://script.google.com/macros/s/AKfycbwZyi-i1WHuJaYwvvIZH6fyrbN58t8d4kbj6hzThKXKT390OHJj-yydQJAqGBgbXOJM/exec';
 
-// GAS v3 — Single-spreadsheet, multi-user, auto-creates sheets, supports attachments[] + Drive folders + delete_user
+// GAS v4 — Single-spreadsheet, multi-user, upsert/delete by entry_id, Drive folder sync
 const GAS_TEMPLATE = `// ================================================================
-// JATRACK — Google Apps Script v3
-// Single Spreadsheet | Multi-User | Auto-Setup | Supports Attachments
+// JATRACK — Google Apps Script v4
+// Single Spreadsheet | Multi-User | Upsert/Delete by entry_id
 // Drive Folder Sync | User Delete Logging
-// Admin-only backend. Users never configure this.
 // ================================================================
-var VERSION = '3.0';
+var VERSION = '4.0';
 var S_CONFIG  = '_CONFIG';
 var S_USERS   = '_USER_REGISTRY';
 var S_ENTRIES = 'ALL_ENTRIES';
@@ -298,6 +336,12 @@ var KPI_HEADERS = [
   'entry_id'
 ];
 
+function jsonOut(obj) {
+  return ContentService
+    .createTextOutput(JSON.stringify(obj))
+    .setMimeType(ContentService.MimeType.JSON);
+}
+
 function cleanName(v, fallback) {
   var s = String(v || '').replace(/[\\\\/?*[\\]:]/g, '').trim().replace(/\\s+/g, '_').slice(0, 60);
   return s || (fallback || 'user');
@@ -313,7 +357,6 @@ function styleHeader(sh, cols, bg, fg) {
   sh.setFrozenRows(1);
 }
 
-// ── Ensure system sheets exist ──────────────────────────────
 function ensureConfig(ss) {
   var sh = getOrCreate(ss, S_CONFIG);
   if (sh.getLastRow() === 0) {
@@ -340,13 +383,10 @@ function ensureAllEntries(ss) {
   if (sh.getLastRow() === 0) {
     sh.appendRow(ENTRY_HEADERS);
     styleHeader(sh, ENTRY_HEADERS.length, '#2C2A28');
-    sh.setColumnWidth(1, 160); sh.setColumnWidth(3, 140);
-    sh.setColumnWidth(9, 150); sh.setColumnWidth(17, 220);
   }
   return sh;
 }
 
-// ── Per-user KPI sheet ──────────────────────────────────────
 function ensureKpiSheet(ss, sheetName, nickname) {
   var sh = ss.getSheetByName(sheetName);
   if (sh) return sh;
@@ -357,22 +397,6 @@ function ensureKpiSheet(ss, sheetName, nickname) {
   return sh;
 }
 
-// ── Upsert user registry ────────────────────────────────────
-function upsertUser(sh, uid, email, nickname, role, kpiSheet) {
-  var data = sh.getDataRange().getValues();
-  for (var i = 1; i < data.length; i++) {
-    if (String(data[i][0]) === String(uid)) {
-      sh.getRange(i + 1, 3).setValue(nickname);
-      sh.getRange(i + 1, 7).setValue(new Date().toISOString());
-      sh.getRange(i + 1, 8).setValue(Number(data[i][7] || 0) + 1);
-      return;
-    }
-  }
-  sh.appendRow([uid, email, nickname, role, kpiSheet,
-    new Date().toISOString(), new Date().toISOString(), 1]);
-}
-
-// ── Parse attachments from payload ─────────────────────────
 function parseAtt(d) {
   var atts = d.attachments;
   if (!atts || !Array.isArray(atts) || atts.length === 0) {
@@ -381,13 +405,71 @@ function parseAtt(d) {
   return {
     count: atts.length,
     links: atts.map(function(a) { return a.link || ''; }).filter(Boolean).join(' | '),
-    names: atts.map(function(a) {
-      return a.normalizedName || a.originalName || '';
-    }).filter(Boolean).join(' | ')
+    names: atts.map(function(a) { return a.normalizedName || a.originalName || ''; }).filter(Boolean).join(' | ')
   };
 }
 
-// ── Drive folder helpers ────────────────────────────────────
+function findRowByEntryId(sh, entryId) {
+  if (!entryId || sh.getLastRow() < 2) return 0;
+  var data = sh.getRange(2, 1, sh.getLastRow() - 1, sh.getLastColumn()).getValues();
+  for (var i = 0; i < data.length; i++) {
+    if (String(data[i][data[i].length - 1]) === String(entryId)) return i + 2;
+  }
+  return 0;
+}
+
+function upsertRow(sh, values, entryId) {
+  var row = findRowByEntryId(sh, entryId);
+  if (row > 0) {
+    sh.getRange(row, 1, 1, values.length).setValues([values]);
+    return 'updated';
+  }
+  sh.appendRow(values);
+  return 'inserted';
+}
+
+function deleteRowByEntryId(sh, entryId) {
+  var row = findRowByEntryId(sh, entryId);
+  if (row > 0) {
+    sh.deleteRow(row);
+    return true;
+  }
+  return false;
+}
+
+function upsertUser(sh, uid, email, nickname, role, kpiSheet) {
+  var data = sh.getDataRange().getValues();
+  for (var i = 1; i < data.length; i++) {
+    if (String(data[i][0]) === String(uid)) {
+      sh.getRange(i + 1, 2, 1, 4).setValues([[email, nickname, role, kpiSheet]]);
+      sh.getRange(i + 1, 7).setValue(new Date().toISOString());
+      sh.getRange(i + 1, 8).setValue(Number(data[i][7] || 0) + 1);
+      return;
+    }
+  }
+  sh.appendRow([uid, email, nickname, role, kpiSheet, new Date().toISOString(), new Date().toISOString(), 1]);
+}
+
+function getMasterRow(d, uid, email, nickname, role, att) {
+  return [
+    d.timestamp || new Date().toISOString(), d.date || '', uid, email,
+    nickname, role, d.group || '', d.taskId || '', d.taskName || '',
+    d.quantity || 0, d.unit || '', d.credits || 0, d.notes || '',
+    d.canvaLink || '', d.driveLink || '',
+    att.count, att.links, att.names, d.entry_id || d.id || ''
+  ];
+}
+
+function getKpiRow(d, att) {
+  return [
+    d.timestamp || new Date().toISOString(), d.date || '',
+    d.group || '', d.taskId || '', d.taskName || '',
+    d.quantity || 0, d.unit || '', d.credits || 0, d.notes || '',
+    d.canvaLink || '', d.driveLink || '',
+    att.count, att.links, att.names, d.entry_id || d.id || ''
+  ];
+}
+
 function getOrCreateFolder(parent, name) {
   var iter = parent.getFoldersByName(name);
   return iter.hasNext() ? iter.next() : parent.createFolder(name);
@@ -408,7 +490,7 @@ function syncDriveFolders(d) {
     if (brands.indexOf('pv') !== -1) { getOrCreateFolder(gFolder, 'PV'); subs.push('PV'); }
     created.push(gName + (subs.length ? ' [' + subs.join(', ') + ']' : ''));
   });
-  return { ok: true, created: created };
+  return { ok: true, created: created, version: VERSION };
 }
 
 function logDeleteUser(d, ss) {
@@ -423,39 +505,30 @@ function logDeleteUser(d, ss) {
   }
 }
 
-// ── doGet — health check ────────────────────────────────────
 function doGet() {
-  return ContentService
-    .createTextOutput(JSON.stringify({ ok: true, version: VERSION, service: 'JATRACK GAS v3' }))
-    .setMimeType(ContentService.MimeType.JSON);
+  return jsonOut({ ok: true, version: VERSION, service: 'JATRACK GAS v4' });
 }
 
-// ── doPost — main entry webhook ─────────────────────────────
 function doPost(e) {
   try {
-    var ss  = SpreadsheetApp.getActiveSpreadsheet();
-    var d   = JSON.parse((e && e.postData && e.postData.contents) || '{}');
+    var ss = SpreadsheetApp.getActiveSpreadsheet();
+    var d  = JSON.parse((e && e.postData && e.postData.contents) || '{}');
+    var action = String(d.action || 'upsert_entry');
 
-    // ── Action routing (v3) ─────────────────────────────────
-    var action = d.action || '';
     if (action === 'sync_drive_folders') {
-      var folderResult = syncDriveFolders(d);
-      return ContentService
-        .createTextOutput(JSON.stringify(folderResult))
-        .setMimeType(ContentService.MimeType.JSON);
+      return jsonOut(syncDriveFolders(d));
     }
     if (action === 'delete_user') {
       logDeleteUser(d, ss);
-      return ContentService
-        .createTextOutput(JSON.stringify({ ok: true, version: VERSION }))
-        .setMimeType(ContentService.MimeType.JSON);
+      return jsonOut({ ok: true, version: VERSION });
     }
 
     var uid      = String(d.uid || '');
     var email    = String(d.email || '');
     var nickname = cleanName(d.nickname || d.name || ('user_' + uid.slice(0, 6)), 'User');
     var role     = cleanName(d.role || 'member', 'member');
-    var kpiName  = nickname + '_KPI';
+    var kpiName  = cleanName(d.kpiSheet || (nickname + '_KPI'), nickname + '_KPI');
+    var entryId  = String(d.entry_id || d.id || '');
     var att      = parseAtt(d);
 
     ensureConfig(ss);
@@ -465,50 +538,34 @@ function doPost(e) {
 
     upsertUser(userReg, uid, email, nickname, role, kpiName);
 
-    // Write to ALL_ENTRIES (master log)
-    allEntries.appendRow([
-      d.timestamp || new Date().toISOString(), d.date || '', uid, email,
-      nickname, role, d.group || '', d.taskId || '', d.taskName || '',
-      d.quantity || 0, d.unit || '', d.credits || 0, d.notes || '',
-      d.canvaLink || '', d.driveLink || '',
-      att.count, att.links, att.names, d.id || ''
-    ]);
+    if (action === 'delete_entry') {
+      var deletedMaster = deleteRowByEntryId(allEntries, entryId);
+      var deletedKpi = deleteRowByEntryId(kpiSheet, entryId);
+      return jsonOut({ ok: true, version: VERSION, deletedMaster: deletedMaster, deletedKpi: deletedKpi });
+    }
 
-    // Write to per-user KPI sheet
-    kpiSheet.appendRow([
-      d.timestamp || new Date().toISOString(), d.date || '',
-      d.group || '', d.taskId || '', d.taskName || '',
-      d.quantity || 0, d.unit || '', d.credits || 0, d.notes || '',
-      d.canvaLink || '', d.driveLink || '',
-      att.count, att.links, att.names, d.id || ''
-    ]);
-
-    return ContentService
-      .createTextOutput(JSON.stringify({ ok: true, version: VERSION, nickname: nickname, kpiSheet: kpiName }))
-      .setMimeType(ContentService.MimeType.JSON);
+    var masterStatus = upsertRow(allEntries, getMasterRow(d, uid, email, nickname, role, att), entryId);
+    var kpiStatus = upsertRow(kpiSheet, getKpiRow(d, att), entryId);
+    return jsonOut({ ok: true, version: VERSION, masterStatus: masterStatus, kpiStatus: kpiStatus, nickname: nickname, kpiSheet: kpiName });
   } catch (err) {
-    return ContentService
-      .createTextOutput(JSON.stringify({ ok: false, error: String(err) }))
-      .setMimeType(ContentService.MimeType.JSON);
+    return jsonOut({ ok: false, error: String(err), version: VERSION });
   }
 }
 
-// ── Admin: run once to initialise all sheets ────────────────
 function adminSetup() {
   var ss = SpreadsheetApp.getActiveSpreadsheet();
   ensureConfig(ss);
   ensureUserRegistry(ss);
   ensureAllEntries(ss);
   SpreadsheetApp.getUi().alert(
-    '✅ JATRACK v3 Setup Complete!\\n\\n' +
+    '✅ JATRACK v4 Setup Complete!\\n\\n' +
     'Sheets created:\\n  _CONFIG\\n  _USER_REGISTRY\\n  ALL_ENTRIES\\n\\n' +
-    'New in v3: Drive folder sync + user delete logging.\\n\\n' +
+    'New in v4: entry upsert/delete sync + drive folder sync.\\n\\n' +
     'Deploy as Web App → Execute as: Me → Anyone access.\\n' +
     'Paste the /exec URL into JATRACK app Settings.'
   );
 }
 
-// ── Admin menu in Google Sheets ─────────────────────────────
 function onOpen() {
   SpreadsheetApp.getUi()
     .createMenu('🟠 JATRACK Admin')
@@ -612,6 +669,8 @@ function EntryCard({
 }) {
   const group = workGroups[entry.groupId];
   const task  = group?.tasks.find((tk) => tk.id === entry.taskId);
+  const entryBrands = getEntryBrands(entry, group, task);
+  const brandLabel = getBrandLabel(entryBrands);
   const taskName = entry.taskName || task?.name || 'Unknown';
   const unitLabel = entry.unit || task?.unit || 'หน่วย';
 
@@ -659,7 +718,17 @@ function EntryCard({
           {group?.icon || entry.groupId.slice(0, 1)}
         </div>
         <div className="flex-1 min-w-0">
-          <p className="font-bold text-[#2C2A28] text-[13px] leading-tight truncate">{taskName}</p>
+          <div className="flex items-center gap-1.5 min-w-0">
+            <p className="font-bold text-[#2C2A28] text-[13px] leading-tight truncate">{taskName}</p>
+            {brandLabel && (
+              <span
+                className="text-[8px] px-1.5 py-0.5 rounded font-black shrink-0"
+                style={getBrandChipStyle(entryBrands)}
+              >
+                {brandLabel}
+              </span>
+            )}
+          </div>
           <p className="text-[10px] text-slate-300 font-semibold uppercase tracking-wider mt-0.5">
             {entry.quantity} {unitLabel} ·{' '}
             <span className="text-[#F4823C]">{entry.credits} Cr.</span>
@@ -702,13 +771,18 @@ function EntryCard({
                       const handle = await idbGet(lf.idbKey);
                       if (handle) {
                         try {
-                          const perm = await handle.requestPermission({ mode: 'read' });
-                          if (perm === 'granted') {
-                            const file = await handle.getFile();
-                            const url  = URL.createObjectURL(file);
-                            window.open(url, '_blank');
-                            return;
+                          const readableHandle = handle as FileHandleWithPermission;
+                          if (typeof readableHandle.requestPermission === 'function') {
+                            const perm = await readableHandle.requestPermission({ mode: 'read' });
+                            if (perm !== 'granted') {
+                              onShowToast('ไฟล์ไม่พร้อมใช้งาน — เปิดบนอุปกรณ์เดิม');
+                              return;
+                            }
                           }
+                          const file = await handle.getFile();
+                          const url  = URL.createObjectURL(file);
+                          window.open(url, '_blank');
+                          return;
                         } catch { /* fall through */ }
                       }
                     }
@@ -1256,16 +1330,14 @@ const LoadingScreen = () => (
 
 // ─── SIGN IN SCREEN ───────────────────────────────────────────────────────────
 const SignInScreen = ({
-  onSignIn, onEmailSignIn, onEmailRegister, loading, toast,
+  onSignIn, onEmailSignIn, loading, toast,
 }: {
   onSignIn: () => void;
   onEmailSignIn: (email: string, password: string) => Promise<void>;
-  onEmailRegister: (email: string, password: string) => Promise<void>;
   loading: boolean;
   toast: { show: boolean; message: string };
 }) => {
   const [mode, setMode] = React.useState<'google' | 'email'>('google');
-  const [isRegister, setIsRegister] = React.useState(false);
   const [email, setEmail] = React.useState('');
   const [password, setPassword] = React.useState('');
   const [emailLoading, setEmailLoading] = React.useState(false);
@@ -1274,8 +1346,7 @@ const SignInScreen = ({
     if (!email.trim() || !password.trim()) return;
     setEmailLoading(true);
     try {
-      if (isRegister) await onEmailRegister(email.trim(), password);
-      else            await onEmailSignIn(email.trim(), password);
+      await onEmailSignIn(email.trim(), password);
     } finally {
       setEmailLoading(false);
     }
@@ -1336,16 +1407,6 @@ const SignInScreen = ({
           </>
         ) : (
           <>
-            <div className="flex bg-white rounded-2xl border border-slate-100 overflow-hidden text-[12px] font-bold">
-              <button onClick={() => setIsRegister(false)}
-                className={`flex-1 py-2.5 transition-colors ${!isRegister ? 'bg-[#F4823C] text-white' : 'text-slate-400'}`}>
-                เข้าสู่ระบบ
-              </button>
-              <button onClick={() => setIsRegister(true)}
-                className={`flex-1 py-2.5 transition-colors ${isRegister ? 'bg-[#F4823C] text-white' : 'text-slate-400'}`}>
-                สมัครสมาชิก
-              </button>
-            </div>
             <input type="email" placeholder="อีเมล" value={email} onChange={e => setEmail(e.target.value)}
               className="w-full px-4 py-3.5 bg-white border border-slate-200 rounded-2xl text-[13px] outline-none"
               onKeyDown={e => e.key === 'Enter' && void handleEmail()} />
@@ -1355,10 +1416,10 @@ const SignInScreen = ({
             <button onClick={() => void handleEmail()} disabled={emailLoading || !email || !password}
               className="w-full py-4 rounded-2xl font-bold text-[14px] text-white active:scale-95 transition-all disabled:opacity-50 flex items-center justify-center gap-2"
               style={{ background: 'linear-gradient(135deg, #F4823C, #F5A855)' }}>
-              {emailLoading ? <RefreshCw size={16} className="animate-spin" /> : (isRegister ? '📧 สมัครสมาชิก' : '🔑 เข้าสู่ระบบ')}
+              {emailLoading ? <RefreshCw size={16} className="animate-spin" /> : '🔑 เข้าสู่ระบบด้วยรหัสผ่าน'}
             </button>
             <p className="text-center text-[10px] text-slate-300">
-              ⚠️ อีเมล + รหัสผ่าน ไม่รองรับอัพโหลด Google Drive โดยตรง
+              ใช้ได้หลังจากเข้า Google ครั้งแรกและตั้งรหัสผ่านใน Settings
             </p>
           </>
         )}
@@ -1436,8 +1497,10 @@ export default function App() {
   const [signInLoading, setSignInLoading]   = useState(false);
 
   // ── User Profile + Access Policy
+  const [viewerProfile, setViewerProfile]   = useState<UserProfile | null>(null);
   const [userProfile, setUserProfile]       = useState<UserProfile | null>(null);
   const [profileLoading, setProfileLoading] = useState(false);
+  const [effectiveProfileLoading, setEffectiveProfileLoading] = useState(false);
   const [nicknameDraft, setNicknameDraft]   = useState('');
 
   // ── KPI Config
@@ -1479,6 +1542,8 @@ export default function App() {
   const [adminEntries, setAdminEntries]     = useState<WorkEntry[]>([]);
   const [adminTargets, setAdminTargets]     = useState<Record<string, number>>({});
   const [adminLoading, setAdminLoading]     = useState(false);
+  const [actingAsUid, setActingAsUid]       = useState<string | null>(null);
+  const [showSwitchUserModal, setShowSwitchUserModal] = useState(false);
 
   // ── Integration states
   const [sheetsWebhookUrl, setSheetsWebhookUrl] = useState('');
@@ -1503,7 +1568,6 @@ export default function App() {
   const editDriveInputRef = useRef<HTMLInputElement | null>(null);
   // Cache Drive subfolder IDs to avoid repeated API lookups per session
   const subfolderCache = useRef(new Map<string, string>());
-  const isSuperAdmin = isSuperAdminEmail(currentUser?.email);
 
   // ── New v3 states
   const [syncQueueCount, setSyncQueueCount]       = useState(0);
@@ -1511,6 +1575,10 @@ export default function App() {
   const [showDriveTreeModal, setShowDriveTreeModal] = useState(false);
   const [driveTreeLoading, setDriveTreeLoading]   = useState(false);
   const [pendingLocalFiles, setPendingLocalFiles] = useState<LocalFileRef[]>([]);
+  const [currentPasswordDraft, setCurrentPasswordDraft] = useState('');
+  const [newPasswordDraft, setNewPasswordDraft] = useState('');
+  const [confirmPasswordDraft, setConfirmPasswordDraft] = useState('');
+  const [passwordSaving, setPasswordSaving] = useState(false);
 
   // ── Group expand/collapse + brand/icon management
   const [expandedGroups, setExpandedGroups]     = useState<Set<string>>(new Set());
@@ -1518,6 +1586,68 @@ export default function App() {
   const [hoveredGroup, setHoveredGroup]         = useState<string | null>(null);
   const [logBrandMode, setLogBrandMode]         = useState<BrandMode>('all');
   const [summaryBrandMode, setSummaryBrandMode] = useState<BrandMode>('all');
+  const isSuperAdmin = isSuperAdminEmail(currentUser?.email);
+  const effectiveUid = actingAsUid || currentUser?.uid || '';
+  const isActingAs = Boolean(isSuperAdmin && actingAsUid && actingAsUid !== currentUser?.uid);
+  const hasPasswordLogin = Boolean(currentUser?.providerData.some((provider) => provider.providerId === 'password'));
+
+  const getEntriesCacheKey = (targetUid: string) => {
+    if (!currentUser) return '';
+    return scopedKey(
+      currentUser.uid,
+      targetUid === currentUser.uid ? 'entries_v8' : `entries_v8_${targetUid}`
+    );
+  };
+
+  const readStoredUserSettings = (uid: string): StoredUserSettings => {
+    const read = (key: string) => localStorage.getItem(scopedKey(uid, key)) ?? '';
+    const savedHover = read('auto_hover_expand');
+    let autoHover = DEFAULT_USER_SETTINGS.autoHoverExpand;
+    if (savedHover) {
+      try {
+        autoHover = JSON.parse(savedHover) as boolean;
+      } catch {
+        autoHover = DEFAULT_USER_SETTINGS.autoHoverExpand;
+      }
+    }
+    return {
+      autoHoverExpand: autoHover,
+      calY8Url: read('cal_y8'),
+      calPvUrl: read('cal_pv'),
+      driveFolderId: read('drive_folder_id'),
+      sheetUrl: read('sheet_url'),
+    };
+  };
+
+  const applyUserSettings = (settings: Partial<StoredUserSettings>) => {
+    if (settings.autoHoverExpand !== undefined) setAutoHoverExpand(Boolean(settings.autoHoverExpand));
+    if (settings.calY8Url !== undefined) setCalY8Url(settings.calY8Url || '');
+    if (settings.calPvUrl !== undefined) setCalPvUrl(settings.calPvUrl || '');
+    if (settings.driveFolderId !== undefined) setDriveFolderId(settings.driveFolderId || '');
+    if (settings.sheetUrl !== undefined) setSheetUrl(settings.sheetUrl || '');
+  };
+
+  const persistLocalUserSettings = (uid: string, settings: StoredUserSettings) => {
+    localStorage.setItem(scopedKey(uid, 'sheet_url'), settings.sheetUrl);
+    localStorage.setItem(scopedKey(uid, 'cal_y8'), settings.calY8Url);
+    localStorage.setItem(scopedKey(uid, 'cal_pv'), settings.calPvUrl);
+    localStorage.setItem(scopedKey(uid, 'drive_folder_id'), settings.driveFolderId);
+    localStorage.setItem(scopedKey(uid, 'auto_hover_expand'), JSON.stringify(settings.autoHoverExpand));
+  };
+
+  const orderedGroupKeys = useMemo(
+    () => Object.keys(kpiConfig).sort(),
+    [kpiConfig]
+  );
+
+  const visibleLogGroupKeys = useMemo(
+    () =>
+      orderedGroupKeys.filter((key) => {
+        if (logBrandMode === 'all') return true;
+        return getVisibleTasksForGroup(kpiConfig[key], logBrandMode).length > 0;
+      }),
+    [kpiConfig, logBrandMode, orderedGroupKeys]
+  );
 
   // ── Offline detection
   useEffect(() => {
@@ -1531,25 +1661,13 @@ export default function App() {
     };
   }, []);
 
-  // ── Load per-user integration settings
+  // ── Load signed-in user's cached settings
   useEffect(() => {
     if (!currentUser) return;
-    const uid = currentUser.uid;
-    const readSetting = (key: string, fallback = '') =>
-      localStorage.getItem(scopedKey(uid, key)) ?? fallback;
-
-    setSheetUrl(readSetting('sheet_url', ''));
-    // Always use DEFAULT_GAS_WEBHOOK unless admin has explicitly saved a different one
-    const savedWebhook = readSetting('sheets_webhook', '');
+    applyUserSettings(readStoredUserSettings(currentUser.uid));
+    const savedWebhook = localStorage.getItem(scopedKey(currentUser.uid, 'sheets_webhook')) ?? '';
     setSheetsWebhookUrl(savedWebhook || DEFAULT_GAS_WEBHOOK);
-    setCalY8Url(readSetting('cal_y8', ''));
-    setCalPvUrl(readSetting('cal_pv', ''));
-    setDriveFolderId(readSetting('drive_folder_id', ''));
-    setGeminiApiKey(readSetting('gemini_api_key', ''));
-    const savedHover = readSetting('auto_hover_expand', '');
-    if (savedHover) {
-      try { setAutoHoverExpand(JSON.parse(savedHover) as boolean); } catch { /* ignore */ }
-    }
+    setGeminiApiKey(localStorage.getItem(scopedKey(currentUser.uid, 'gemini_api_key')) ?? '');
   }, [currentUser]);
 
   // ── Init syncQueueCount when user changes
@@ -1559,17 +1677,23 @@ export default function App() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentUser]);
 
-  // ── Sync customTitleDraft when Settings opens
+  // ── Sync drafts when Settings opens or acting user changes
   useEffect(() => {
     if (!showSettings) return;
-    if (userProfile?.customTitle !== undefined) setCustomTitleDraft(userProfile.customTitle || '');
-  }, [showSettings]);
+    setNicknameDraft(userProfile?.nickname || '');
+    setCustomTitleDraft(userProfile?.customTitle || '');
+    setCurrentPasswordDraft('');
+    setNewPasswordDraft('');
+    setConfirmPasswordDraft('');
+  }, [showSettings, userProfile]);
 
   // ── localStorage offline cache
   useEffect(() => {
-    if (!currentUser) return;
-    localStorage.setItem(scopedKey(currentUser.uid, 'entries_v8'), JSON.stringify(entries));
-  }, [entries, currentUser]);
+    if (!currentUser || !effectiveUid) return;
+    const cacheKey = getEntriesCacheKey(effectiveUid);
+    if (!cacheKey) return;
+    localStorage.setItem(cacheKey, JSON.stringify(entries));
+  }, [entries, currentUser, effectiveUid]);
 
   const showToast = (message: string) => {
     setToast({ show: true, message });
@@ -1601,14 +1725,19 @@ export default function App() {
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, (user) => {
       setCurrentUser(user);
+      if (!user) {
+        setViewerProfile(null);
+        setUserProfile(null);
+        setActingAsUid(null);
+      }
       setAuthLoading(false);
     });
     return () => unsubscribe();
   }, []);
 
-  // ── User profile listener + role policy by email
+  // ── Signed-in user profile listener + role policy by email
   useEffect(() => {
-    if (!currentUser) { setUserProfile(null); return; }
+    if (!currentUser) { setViewerProfile(null); return; }
     setProfileLoading(true);
     const forcedRole = resolveRoleByEmail(currentUser.email);
     const forcedAdmin = isSuperAdminEmail(currentUser.email);
@@ -1630,17 +1759,14 @@ export default function App() {
             createdAt: profile.createdAt || now,
             updatedAt: now,
           };
-          setUserProfile(merged);
-          setNicknameDraft(merged.nickname || '');
-          // ── Load persistent settings + customTitle from Firestore
-          if (profile.customTitle) setCustomTitleDraft(profile.customTitle);
-          if (profile.settings) {
-            const s = profile.settings;
-            if (s.autoHoverExpand !== undefined) setAutoHoverExpand(s.autoHoverExpand);
-            if (s.calY8Url)       setCalY8Url(s.calY8Url);
-            if (s.calPvUrl)       setCalPvUrl(s.calPvUrl);
-            if (s.driveFolderId)  setDriveFolderId(s.driveFolderId);
-            if (s.sheetUrl)       setSheetUrl(s.sheetUrl);
+          setViewerProfile(merged);
+          if (!isActingAs) {
+            setUserProfile(merged);
+            setNicknameDraft(merged.nickname || '');
+            applyUserSettings({
+              ...DEFAULT_USER_SETTINGS,
+              ...(profile.settings || {}),
+            });
           }
 
           if (
@@ -1672,8 +1798,12 @@ export default function App() {
             updatedAt: now,
           };
           await setDoc(doc(db, 'users', currentUser.uid), profile, { merge: true });
-          setUserProfile(profile);
-          setNicknameDraft('');
+          setViewerProfile(profile);
+          if (!isActingAs) {
+            setUserProfile(profile);
+            setNicknameDraft('');
+            applyUserSettings(DEFAULT_USER_SETTINGS);
+          }
         }
         setProfileLoading(false);
       },
@@ -1683,21 +1813,60 @@ export default function App() {
       }
     );
     return () => unsubscribe();
-  }, [currentUser]);
+  }, [currentUser, isActingAs]);
 
-  // ── KPI config listener (per user)
+  // ── Effective profile listener for act-as-user
   useEffect(() => {
-    if (!currentUser) return;
+    if (!currentUser) { setUserProfile(null); return; }
+    if (!isActingAs || !actingAsUid) {
+      setEffectiveProfileLoading(false);
+      setUserProfile(viewerProfile);
+      return;
+    }
+
+    setEffectiveProfileLoading(true);
     const unsubscribe = onSnapshot(
-      doc(db, 'kpiConfigs', currentUser.uid),
+      doc(db, 'users', actingAsUid),
+      (snap) => {
+        if (snap.exists()) {
+          const profile = snap.data() as UserProfile;
+          setUserProfile(profile);
+          applyUserSettings({
+            ...DEFAULT_USER_SETTINGS,
+            ...(profile.settings || {}),
+          });
+        } else {
+          setUserProfile(null);
+          applyUserSettings(DEFAULT_USER_SETTINGS);
+        }
+        setEffectiveProfileLoading(false);
+      },
+      (err) => {
+        console.warn('Effective profile listener:', err.message);
+        setEffectiveProfileLoading(false);
+      }
+    );
+    return () => unsubscribe();
+  }, [actingAsUid, currentUser, isActingAs, viewerProfile]);
+
+  // ── KPI config listener (per effective user)
+  useEffect(() => {
+    if (!currentUser || !effectiveUid) return;
+    const unsubscribe = onSnapshot(
+      doc(db, 'kpiConfigs', effectiveUid),
       async (snap) => {
-        const initial = getInitialKpiForEmail(currentUser.email);
+        const actingProfile = actingAsUid ? adminProfiles.find((profile) => profile.uid === actingAsUid) : null;
+        const initial = getInitialKpiForEmail(
+          isActingAs ? (userProfile?.email || actingProfile?.email) : currentUser.email
+        );
         if (snap.exists() && snap.data()?.groups) {
           const data = snap.data()!;
           const migratedGroups = migrateWorkGroups(data.groups as WorkGroups);
           const needsBrandMigration = JSON.stringify(migratedGroups) !== JSON.stringify(data.groups);
           const mustResetToPolicy =
-            !isHostEmail(currentUser.email) && Number(data.policyVersion || 0) < KPI_POLICY_VERSION;
+            !isActingAs &&
+            !isHostEmail(currentUser.email) &&
+            Number(data.policyVersion || 0) < KPI_POLICY_VERSION;
 
           if (mustResetToPolicy) {
             setKpiConfig(initial.groups);
@@ -1715,7 +1884,7 @@ export default function App() {
           } else {
             setKpiConfig(migratedGroups);
             setMonthlyTarget(Math.max(0, Number(data.monthlyTarget || 0)));
-            if (needsBrandMigration) {
+            if (needsBrandMigration && !isActingAs) {
               await setDoc(doc(db, 'kpiConfigs', currentUser.uid), {
                 groups: migratedGroups,
                 updatedAt: Date.now(),
@@ -1725,27 +1894,32 @@ export default function App() {
         } else {
           setKpiConfig(initial.groups);
           setMonthlyTarget(initial.monthlyTarget);
-          await setDoc(doc(db, 'kpiConfigs', currentUser.uid), {
-            uid: currentUser.uid,
-            roleId: initial.roleId,
-            label: initial.label,
-            groups: initial.groups,
-            monthlyTarget: initial.monthlyTarget,
-            policyVersion: KPI_POLICY_VERSION,
-            seededAt: Date.now(),
-            updatedAt: Date.now(),
-          }, { merge: true });
+          if (!isActingAs) {
+            await setDoc(doc(db, 'kpiConfigs', currentUser.uid), {
+              uid: currentUser.uid,
+              roleId: initial.roleId,
+              label: initial.label,
+              groups: initial.groups,
+              monthlyTarget: initial.monthlyTarget,
+              policyVersion: KPI_POLICY_VERSION,
+              seededAt: Date.now(),
+              updatedAt: Date.now(),
+            }, { merge: true });
+          }
         }
       },
       (err) => {
         console.warn('KPI Config listener:', err.message);
-        const initial = getInitialKpiForEmail(currentUser.email);
+        const actingProfile = actingAsUid ? adminProfiles.find((profile) => profile.uid === actingAsUid) : null;
+        const initial = getInitialKpiForEmail(
+          isActingAs ? (userProfile?.email || actingProfile?.email) : currentUser.email
+        );
         setKpiConfig(initial.groups);
         setMonthlyTarget(initial.monthlyTarget);
       }
     );
     return () => unsubscribe();
-  }, [currentUser]);
+  }, [actingAsUid, adminProfiles, currentUser, effectiveUid, isActingAs, userProfile]);
 
   // ── Admin-only global visibility
   useEffect(() => {
@@ -1803,11 +1977,11 @@ export default function App() {
 
   // ── Firestore entries listener (Phase 3: use uid)
   useEffect(() => {
-    if (!currentUser) return;
+    if (!currentUser || !effectiveUid) return;
     setIsLoading(true);
 
     const q = query(
-      collection(db, 'users', currentUser.uid, 'entries'),
+      collection(db, 'users', effectiveUid, 'entries'),
       orderBy('createdAt', 'desc')
     );
 
@@ -1820,7 +1994,7 @@ export default function App() {
       },
       (error) => {
         console.error('Firestore:', error);
-        const saved = localStorage.getItem(scopedKey(currentUser.uid, 'entries_v8'));
+        const saved = localStorage.getItem(getEntriesCacheKey(effectiveUid));
         if (saved) try { setEntries(JSON.parse(saved)); } catch { /* ignore */ }
         setIsLoading(false);
         showToast('⚠️ ใช้ข้อมูล offline');
@@ -1828,7 +2002,7 @@ export default function App() {
     );
 
     return () => unsubscribe();
-  }, [currentUser]);
+  }, [currentUser, effectiveUid]);
 
   // ── Calendar iCal fetch (fetches when Today tab is active)
   useEffect(() => {
@@ -1939,24 +2113,17 @@ export default function App() {
 
   const handleEmailSignIn = async (email: string, password: string) => {
     try {
-      await signInWithEmailAndPassword(auth, email, password);
+      const methods = await fetchSignInMethodsForEmail(auth, email.trim());
+      if (!methods.includes('password')) {
+        showToast('❌ บัญชีนี้ต้องเข้า Google ก่อน แล้วตั้งรหัสผ่านใน Settings');
+        return;
+      }
+      await signInWithEmailAndPassword(auth, email.trim(), password);
     } catch (e: unknown) {
       const code = (e as { code?: string })?.code || '';
       if (code === 'auth/invalid-credential' || code === 'auth/wrong-password') showToast('❌ อีเมลหรือรหัสผ่านไม่ถูกต้อง');
-      else if (code === 'auth/user-not-found') showToast('❌ ไม่พบบัญชีนี้ ลองสมัครใหม่');
+      else if (code === 'auth/user-not-found') showToast('❌ ไม่พบบัญชีนี้ กรุณาเข้า Google ก่อน');
       else showToast('❌ เข้าสู่ระบบไม่สำเร็จ');
-    }
-  };
-
-  const handleEmailRegister = async (email: string, password: string) => {
-    try {
-      await createUserWithEmailAndPassword(auth, email, password);
-      showToast('✅ สมัครสมาชิกสำเร็จ');
-    } catch (e: unknown) {
-      const code = (e as { code?: string })?.code || '';
-      if (code === 'auth/email-already-in-use') showToast('❌ อีเมลนี้มีบัญชีแล้ว ลองเข้าสู่ระบบ');
-      else if (code === 'auth/weak-password') showToast('❌ รหัสผ่านต้องมีอย่างน้อย 6 ตัวอักษร');
-      else showToast('❌ สมัครสมาชิกไม่สำเร็จ');
     }
   };
 
@@ -1964,6 +2131,8 @@ export default function App() {
     await signOut(auth);
     setEntries([]);
     setShowSettings(false);
+    setShowSwitchUserModal(false);
+    setActingAsUid(null);
     setGoogleAccessToken('');
     setGoogleAccessTokenExpiry(0);
     showToast('ออกจากระบบแล้ว');
@@ -2203,13 +2372,15 @@ export default function App() {
       let targetFolderId: string | undefined;
       const baseFolderId = driveFolderId.trim();
       if (baseFolderId) {
-        const token = await ensureDriveAccessToken();
-        if (token) {
-          const entryGroupId = mode === 'log' ? selectedGroup : (editEntry?.groupId || selectedGroup);
-          const grp          = kpiConfig[entryGroupId];
-          const entryDate    = mode === 'log' ? selectedDate : (editEntry?.date || getTodayStr());
-          const [y = '', m = ''] = entryDate.split('-');
-          const monthSub     = `${y}-${m}`;
+          const token = await ensureDriveAccessToken();
+          if (token) {
+            const entryGroupId = mode === 'log' ? selectedGroup : (editEntry?.groupId || selectedGroup);
+            const grp          = kpiConfig[entryGroupId];
+            const entryTaskId  = mode === 'log' ? (currentTask?.id || selectedTaskId) : (editEntry?.taskId || selectedTaskId);
+            const entryTask    = grp?.tasks.find((task) => task.id === entryTaskId);
+            const entryDate    = mode === 'log' ? selectedDate : (editEntry?.date || getTodayStr());
+            const [y = '', m = ''] = entryDate.split('-');
+            const monthSub     = `${y}-${m}`;
 
           let folderId = baseFolderId;
 
@@ -2219,7 +2390,7 @@ export default function App() {
           }
 
           // Level 2: Brand subfolder — only when group has exactly ONE brand (unambiguous)
-          const brands = grp?.brands ?? [];
+          const brands = getTaskBrands(entryTask, grp);
           if (brands.length === 1) {
             folderId = await getOrCreateDriveSubfolder(folderId, brands[0].toUpperCase(), token);
           }
@@ -2271,27 +2442,99 @@ export default function App() {
   };
 
   const handleSaveNickname = async (nextNickname: string): Promise<boolean> => {
-    if (!currentUser) return false;
+    if (!currentUser || !effectiveUid) return false;
     const cleaned = nextNickname.trim();
     if (!cleaned) {
       showToast('กรุณาใส่ชื่อเล่น');
       return false;
     }
-    await setDoc(doc(db, 'users', currentUser.uid), {
-      nickname: cleaned,
-      role: resolveRoleByEmail(currentUser.email),
-      isAdmin: isSuperAdminEmail(currentUser.email),
-      updatedAt: Date.now(),
-    }, { merge: true });
+    const payload = effectiveUid === currentUser.uid
+      ? {
+          nickname: cleaned,
+          role: resolveRoleByEmail(currentUser.email),
+          isAdmin: isSuperAdminEmail(currentUser.email),
+          updatedAt: Date.now(),
+        }
+      : {
+          nickname: cleaned,
+          updatedAt: Date.now(),
+        };
+    await setDoc(doc(db, 'users', effectiveUid), payload, { merge: true });
     setNicknameDraft(cleaned);
     setUserProfile((prev) => (prev ? { ...prev, nickname: cleaned } : prev));
+    if (effectiveUid === currentUser.uid) {
+      setViewerProfile((prev) => (prev ? { ...prev, nickname: cleaned } : prev));
+    }
     showToast('บันทึกชื่อเล่นแล้ว');
     return true;
   };
 
+  const handleSavePassword = async () => {
+    if (!currentUser || !currentUser.email) return;
+    const nextPassword = newPasswordDraft.trim();
+    if (nextPassword.length < 6) {
+      showToast('❌ รหัสผ่านต้องมีอย่างน้อย 6 ตัวอักษร');
+      return;
+    }
+    if (nextPassword !== confirmPasswordDraft.trim()) {
+      showToast('❌ รหัสผ่านใหม่ไม่ตรงกัน');
+      return;
+    }
+    if (hasPasswordLogin && !currentPasswordDraft.trim()) {
+      showToast('❌ กรุณาใส่รหัสผ่านปัจจุบัน');
+      return;
+    }
+
+    setPasswordSaving(true);
+    try {
+      if (hasPasswordLogin) {
+        const credential = EmailAuthProvider.credential(currentUser.email, currentPasswordDraft.trim());
+        await reauthenticateWithCredential(currentUser, credential);
+        await updatePassword(currentUser, nextPassword);
+        showToast('✅ เปลี่ยนรหัสผ่านแล้ว');
+      } else {
+        const credential = EmailAuthProvider.credential(currentUser.email, nextPassword);
+        await linkWithCredential(currentUser, credential);
+        showToast('✅ ตั้งรหัสผ่านสำหรับบัญชีนี้แล้ว');
+      }
+      setCurrentPasswordDraft('');
+      setNewPasswordDraft('');
+      setConfirmPasswordDraft('');
+    } catch (error) {
+      const code = (error as { code?: string })?.code || '';
+      if (code === 'auth/requires-recent-login') {
+        try {
+          await reauthenticateWithPopup(currentUser, googleProvider);
+          if (hasPasswordLogin) {
+            await updatePassword(currentUser, nextPassword);
+            showToast('✅ เปลี่ยนรหัสผ่านแล้ว');
+          } else {
+            const credential = EmailAuthProvider.credential(currentUser.email, nextPassword);
+            await linkWithCredential(currentUser, credential);
+            showToast('✅ ตั้งรหัสผ่านสำหรับบัญชีนี้แล้ว');
+          }
+          setCurrentPasswordDraft('');
+          setNewPasswordDraft('');
+          setConfirmPasswordDraft('');
+          return;
+        } catch (reauthError) {
+          console.error('Password reauth failed:', reauthError);
+          showToast('❌ ยืนยันตัวตนใหม่ไม่สำเร็จ');
+          return;
+        }
+      }
+      if (code === 'auth/provider-already-linked') showToast('บัญชีนี้มีรหัสผ่านแล้ว');
+      else if (code === 'auth/wrong-password' || code === 'auth/invalid-credential') showToast('❌ รหัสผ่านปัจจุบันไม่ถูกต้อง');
+      else if (code === 'auth/weak-password') showToast('❌ รหัสผ่านต้องมีอย่างน้อย 6 ตัวอักษร');
+      else showToast('❌ ตั้งค่ารหัสผ่านไม่สำเร็จ');
+    } finally {
+      setPasswordSaving(false);
+    }
+  };
+
   // ── KPI Config save — per user (stored by uid)
   const handleSaveKpiConfig = async (updated: WorkGroups, newTarget?: number) => {
-    if (!currentUser) return;
+    if (!currentUser || !effectiveUid) return;
     const target = Math.max(0, Number(newTarget ?? monthlyTarget) || 0);
     const migratedUpdated = migrateWorkGroups(updated);
     // Immediately sync local state so UI updates without waiting for Firestore listener
@@ -2299,10 +2542,10 @@ export default function App() {
     setLogBrandMode('all');
     setSummaryBrandMode('all');
     if (newTarget !== undefined) setMonthlyTarget(target);
-    await setDoc(doc(db, 'kpiConfigs', currentUser.uid), {
+    await setDoc(doc(db, 'kpiConfigs', effectiveUid), {
       groups: migratedUpdated,
       monthlyTarget: target,
-      uid: currentUser.uid,
+      uid: effectiveUid,
       roleId: userProfile?.role || 'custom',
       policyVersion: KPI_POLICY_VERSION,
       updatedAt: Date.now(),
@@ -2358,60 +2601,92 @@ export default function App() {
     }
   };
 
-  // ── Sheets Auto-Push (fire-and-forget, no-cors)
-  const pushToSheetsWebhook = (entry: WorkEntry) => {
-    if (!sheetsWebhookUrl) return;
-    const task = kpiConfig[entry.groupId]?.tasks.find(t => t.id === entry.taskId);
+  const buildEntryWebhookPayload = (entry: WorkEntry, action: 'upsert_entry' | 'delete_entry'): SheetsWebhookPayload => {
+    const task = kpiConfig[entry.groupId]?.tasks.find((item) => item.id === entry.taskId);
+    const entryBrands = normalizeBrands(entry.brands || getTaskBrands(task, kpiConfig[entry.groupId]));
     const nickname = (userProfile?.nickname || displayName).trim();
-    const sheets = buildSheetNames(nickname, currentUser?.uid);
-    const payload: Record<string, unknown> = {
-      // New payload
-      date:      entry.date,
-      name:      entry.userName || displayName,
-      group:     entry.groupName || kpiConfig[entry.groupId]?.name || entry.groupId,
-      taskId:    entry.taskId,
-      taskName:  entry.taskName || task?.name || '',
-      quantity:  entry.quantity,
-      unit:      entry.unit || task?.unit || '',
-      credits:   entry.credits,
-      notes:     entry.notes,
+    const sheets = buildSheetNames(nickname, effectiveUid);
+    return {
+      action,
+      entry_id: entry.id,
+      date: entry.date,
+      name: entry.userName || displayName,
+      group: entry.groupName || kpiConfig[entry.groupId]?.name || entry.groupId,
+      taskId: entry.taskId,
+      taskName: entry.taskName || task?.name || '',
+      quantity: entry.quantity,
+      unit: entry.unit || task?.unit || '',
+      credits: entry.credits,
+      brands: entryBrands,
+      brand: getBrandLabel(entryBrands) || '',
+      notes: entry.notes,
       canvaLink: entry.canvaLink || '',
       driveLink: entry.driveLink || (entry.attachments?.[0]?.link ?? ''),
-      uid:       currentUser?.uid || '',
-      email:     normalizeEmail(currentUser?.email),
+      uid: effectiveUid,
+      email: normalizeEmail(userProfile?.email || currentUser?.email),
       nickname,
-      role:      userProfile?.role || 'custom',
+      role: userProfile?.role || 'custom',
       timestamp: new Date().toISOString(),
-      // Multi-file attachments (GAS v2)
-      attachments:      entry.attachments || [],
+      attachments: entry.attachments || [],
       attachmentsCount: entry.attachments?.length ?? 0,
-      attachmentsLinks: entry.attachments?.map(a => a.link).join(' | ') ?? (entry.driveLink || ''),
-      attachmentsNames: entry.attachments?.map(a => a.normalizedName).join(' | ') ?? '',
-      // Backward-compatible fields (for legacy consumers)
-      id:        entry.id,
-      user:      entry.userName || displayName,
+      attachmentsLinks: entry.attachments?.map((item) => item.link).join(' | ') ?? (entry.driveLink || ''),
+      attachmentsNames: entry.attachments?.map((item) => item.normalizedName).join(' | ') ?? '',
+      id: entry.id,
+      user: entry.userName || displayName,
       groupName: entry.groupName || kpiConfig[entry.groupId]?.name || entry.groupId,
-      channel:   entry.channel || task?.channel || '',
-      ownerKey:  sheets.ownerKey,
-      masterSheetName:    sheets.masterSheetName,
+      channel: entry.channel || task?.channel || '',
+      ownerKey: sheets.ownerKey,
+      masterSheetName: sheets.masterSheetName,
       dashboardSheetName: sheets.dashboardSheetName,
     };
+  };
 
-    if (!isOnline) {
-      enqueueWebhook(payload);
-      showToast('บันทึกแล้ว (คิวส่งชีตหลังออนไลน์)');
-      return;
-    }
-
-    fetch(sheetsWebhookUrl, {
+  const postSheetsWebhook = async (payload: SheetsWebhookPayload): Promise<SheetsWebhookResponse> => {
+    if (!sheetsWebhookUrl) throw new Error('webhook_missing');
+    const response = await fetch(sheetsWebhookUrl, {
       method: 'POST',
-      mode: 'no-cors',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
-    }).catch(() => {
-      enqueueWebhook(payload);
-      showToast('บันทึกแล้ว (ส่งชีตไม่สำเร็จ, เข้า Queue)');
     });
+    let data: SheetsWebhookResponse | null = null;
+    try {
+      data = await response.json() as SheetsWebhookResponse;
+    } catch {
+      data = null;
+    }
+    if (!response.ok) {
+      throw new Error(data?.error || `webhook_http_${response.status}`);
+    }
+    if (!data?.ok) {
+      throw new Error(data?.error || 'webhook_rejected');
+    }
+    return data;
+  };
+
+  const dispatchSheetsWebhook = async (
+    payload: SheetsWebhookPayload,
+    options?: { queuedMessage?: string; successMessage?: string; failureMessage?: string; queueOnFailure?: boolean }
+  ) => {
+    if (!sheetsWebhookUrl) return false;
+    if (!isOnline) {
+      enqueueWebhook(payload);
+      showToast(options?.queuedMessage || 'บันทึกแล้ว (คิวส่งชีตหลังออนไลน์)');
+      return false;
+    }
+    try {
+      await postSheetsWebhook(payload);
+      if (options?.successMessage) showToast(options.successMessage);
+      return true;
+    } catch (error) {
+      console.error('Sheets webhook error:', error);
+      if (options?.queueOnFailure !== false) {
+        enqueueWebhook(payload);
+        showToast(options?.failureMessage || 'บันทึกแล้ว (ส่งชีตไม่สำเร็จ, เข้า Queue)');
+      } else {
+        showToast(options?.failureMessage || 'ส่งข้อมูลไปชีตไม่สำเร็จ');
+      }
+      return false;
+    }
   };
 
   useEffect(() => {
@@ -2423,12 +2698,7 @@ export default function App() {
       const remaining: Record<string, unknown>[] = [];
       for (const payload of queue) {
         try {
-          await fetch(sheetsWebhookUrl, {
-            method: 'POST',
-            mode: 'no-cors',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(payload),
-          });
+          await postSheetsWebhook(payload as SheetsWebhookPayload);
         } catch {
           remaining.push(payload);
         }
@@ -2440,21 +2710,6 @@ export default function App() {
 
     void flush();
   }, [currentUser, sheetsWebhookUrl, isOnline]);
-
-  // ── Ordered group keys — always sorted alphabetically (A → B → C → D)
-  const orderedGroupKeys = useMemo(
-    () => Object.keys(kpiConfig).sort(),
-    [kpiConfig]
-  );
-
-  const visibleLogGroupKeys = useMemo(
-    () =>
-      orderedGroupKeys.filter((key) => {
-        if (logBrandMode === 'all') return true;
-        return getVisibleTasksForGroup(kpiConfig[key], logBrandMode).length > 0;
-      }),
-    [kpiConfig, logBrandMode, orderedGroupKeys]
-  );
 
   const logBrandModeLabel = logBrandMode === 'all' ? 'All' : logBrandMode.toUpperCase();
   const summaryBrandModeLabel = summaryBrandMode === 'all' ? 'All' : summaryBrandMode.toUpperCase();
@@ -2471,16 +2726,20 @@ export default function App() {
       await deleteDoc(doc(db, 'kpiConfigs', uid));
       // 3. ลบ user profile doc
       await deleteDoc(doc(db, 'users', uid));
-      // 4. Fire webhook notification (fire-and-forget, no-cors)
+      if (actingAsUid === uid) setActingAsUid(null);
       if (sheetsWebhookUrl) {
-        fetch(sheetsWebhookUrl, {
-          method: 'POST', mode: 'no-cors',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            action: 'delete_user', uid, nickname,
+        await dispatchSheetsWebhook(
+          {
+            action: 'delete_user',
+            uid,
+            nickname,
             timestamp: new Date().toISOString(),
-          }),
-        }).catch(() => {});
+          },
+          {
+            successMessage: '',
+            failureMessage: 'ลบผู้ใช้แล้ว แต่แจ้งชีตไม่สำเร็จ (เข้า Queue)',
+          }
+        );
       }
       showToast(`ลบผู้ใช้ "${nickname}" แล้ว ✓`);
     } catch (err) {
@@ -2499,8 +2758,9 @@ export default function App() {
 
   const displayName =
     userProfile?.nickname?.trim() ||
-    currentUser?.displayName ||
-    currentUser?.email?.split('@')[0] ||
+    userProfile?.displayName ||
+    (effectiveUid === currentUser?.uid ? currentUser?.displayName : '') ||
+    userProfile?.email?.split('@')[0] ||
     'User';
 
   const runtimeProjectId = String(firebaseApp.options.projectId || '');
@@ -2521,30 +2781,31 @@ export default function App() {
   // ── Header stats — always current month
   const stats = useMemo(() => {
     const now = new Date();
-    const uid = currentUser?.uid;
-    const userEntries = entries.filter((e) => e.user === uid);
-    const monthEntries = userEntries.filter((e) => {
+    const monthEntries = entries.filter((e) => {
       const parts = parseDateParts(e.date);
       return parts?.monthIndex === now.getMonth() && parts?.year === now.getFullYear();
     });
-    const todayEntries = userEntries.filter((e) => e.date === getTodayStr());
+    const todayEntries = entries.filter((e) => e.date === getTodayStr());
     const monthCredits = monthEntries.reduce((s, e) => s + e.credits, 0);
     return {
       monthTotal:  monthCredits,
       todayTotal:  todayEntries.reduce((s, e) => s + e.credits, 0),
       percent:     safePercent(monthCredits, monthlyTarget),
     };
-  }, [entries, currentUser, monthlyTarget]);
+  }, [entries, monthlyTarget]);
 
   // ── Summary tab data
   const summaryData = useMemo(() => {
-    const uid = currentUser?.uid;
-    const userEntries = entries.filter((e) => e.user === uid);
-    const monthEntries = userEntries.filter((e) => {
+    const monthEntries = entries.filter((e) => {
       const parts = parseDateParts(e.date);
       return parts?.monthIndex === summaryMonth && parts?.year === summaryYear;
     });
-    const totalCredits   = monthEntries.reduce((s, e) => s + e.credits, 0);
+    const filteredEntries = monthEntries.filter((entry) => {
+      const group = kpiConfig[entry.groupId];
+      const task = group?.tasks.find((item) => item.id === entry.taskId);
+      return matchesBrandMode(getEntryBrands(entry, group, task), summaryBrandMode);
+    });
+    const totalCredits   = filteredEntries.reduce((s, e) => s + e.credits, 0);
     const isTargetSet    = monthlyTarget > 0;
     const percent        = safePercent(totalCredits, monthlyTarget);
 
@@ -2552,10 +2813,10 @@ export default function App() {
       .sort((a, b) => a.localeCompare(b))
       .map((key) => ({
         key,
-        name:    monthEntries.find((e) => e.groupId === key)?.groupName || kpiConfig[key].name,
+        name:    filteredEntries.find((e) => e.groupId === key)?.groupName || kpiConfig[key].name,
         color:   kpiConfig[key].color,
         bg:      kpiConfig[key].bg,
-        credits: monthEntries.filter((e) => e.groupId === key).reduce((s, e) => s + e.credits, 0),
+        credits: filteredEntries.filter((e) => e.groupId === key).reduce((s, e) => s + e.credits, 0),
       }))
       .filter((g) => g.credits > 0);
 
@@ -2571,9 +2832,9 @@ export default function App() {
     return {
       totalCredits, percent, groups, maxGroupCredits, isCurrentMonth,
       remainingDays, remainingCredits, dailyNeeded, isComplete, isTargetSet,
-      monthName: getMonthNameThai(summaryMonth), entryCount: monthEntries.length,
+      monthName: getMonthNameThai(summaryMonth), entryCount: filteredEntries.length,
     };
-  }, [entries, currentUser, summaryMonth, summaryYear, kpiConfig, monthlyTarget]);
+  }, [entries, summaryMonth, summaryYear, kpiConfig, monthlyTarget, summaryBrandMode]);
 
   const navSummaryMonth = (dir: -1 | 1) => {
     const next = summaryMonth + dir;
@@ -2626,13 +2887,14 @@ export default function App() {
 
   // ── CRUD handlers
   const handleAddEntry = async () => {
-    if (!currentUser || !currentTask) return;
+    if (!currentUser || !currentTask || !effectiveUid) return;
     const currentGroup = kpiConfig[selectedGroup];
+    const currentBrands = getTaskBrands(currentTask, currentGroup);
     const id = crypto.randomUUID ? crypto.randomUUID() : Math.random().toString(36).substr(2, 9);
     const newEntry: WorkEntry = {
       id,
       date:      selectedDate,
-      user:      currentUser.uid,
+      user:      effectiveUid,
       userName:  displayName,
       role:      userProfile?.role || 'custom',
       groupId:   selectedGroup,
@@ -2642,6 +2904,7 @@ export default function App() {
       quantity,
       unit:      currentTask.unit,
       creditPerUnit: currentTask.creditPerUnit,
+      brands:    currentBrands,
       credits:   quantity * currentTask.creditPerUnit,
       notes,
       channel:   currentTask.channel,
@@ -2655,7 +2918,7 @@ export default function App() {
     };
     setIsLoading(true);
     try {
-      await setDoc(doc(db, 'users', currentUser.uid, 'entries', id), newEntry);
+      await setDoc(doc(db, 'users', effectiveUid, 'entries', id), newEntry);
       showToast(`บันทึกแล้ว +${newEntry.credits} Cr.`);
       setQuantity(1);
       setNotes('');
@@ -2663,7 +2926,10 @@ export default function App() {
       setDriveLink('');
       setLogAttachments([]);
       setPendingLocalFiles([]);
-      pushToSheetsWebhook(newEntry);
+      void dispatchSheetsWebhook(
+        buildEntryWebhookPayload(newEntry, 'upsert_entry'),
+        { failureMessage: 'บันทึกแล้ว (ส่งชีตไม่สำเร็จ, เข้า Queue)' }
+      );
     } catch (e) {
       console.error(e);
       showToast('❌ บันทึกไม่สำเร็จ');
@@ -2673,23 +2939,31 @@ export default function App() {
   };
 
   const handleUpdateEntry = async () => {
-    if (!editEntry || !currentUser) return;
-    const task = kpiConfig[editEntry.groupId]?.tasks.find((t) => t.id === editEntry.taskId);
+    if (!editEntry || !currentUser || !effectiveUid) return;
+    const group = kpiConfig[editEntry.groupId];
+    const task = group?.tasks.find((t) => t.id === editEntry.taskId);
     if (!task) return;
     const updated = {
       ...editEntry,
-      groupName: kpiConfig[editEntry.groupId]?.name || editEntry.groupName || editEntry.groupId,
+      groupName: group?.name || editEntry.groupName || editEntry.groupId,
       taskName: task.name,
       unit: task.unit,
       creditPerUnit: task.creditPerUnit,
+      brands: getTaskBrands(task, group),
       channel: task.channel,
       credits: editEntry.quantity * task.creditPerUnit,
     };
     setIsLoading(true);
     try {
-      await setDoc(doc(db, 'users', currentUser.uid, 'entries', updated.id), updated);
+      await setDoc(doc(db, 'users', effectiveUid, 'entries', updated.id), updated);
+      void dispatchSheetsWebhook(
+        buildEntryWebhookPayload(updated, 'upsert_entry'),
+        {
+          successMessage: 'อัปเดตแล้ว',
+          failureMessage: 'อัปเดตแล้ว แต่ส่งชีตไม่สำเร็จ (เข้า Queue)',
+        }
+      );
       setEditEntry(null);
-      showToast('อัปเดตแล้ว');
     } catch (e) {
       console.error(e);
       showToast('❌ อัปเดตไม่สำเร็จ');
@@ -2699,12 +2973,23 @@ export default function App() {
   };
 
   const handleDelete = async (id: string) => {
-    if (!currentUser) return;
+    if (!currentUser || !effectiveUid) return;
+    const targetEntry = entries.find((entry) => entry.id === id);
     setIsLoading(true);
     try {
-      await deleteDoc(doc(db, 'users', currentUser.uid, 'entries', id));
+      await deleteDoc(doc(db, 'users', effectiveUid, 'entries', id));
+      if (targetEntry) {
+        void dispatchSheetsWebhook(
+          buildEntryWebhookPayload(targetEntry, 'delete_entry'),
+          {
+            successMessage: 'ลบเรียบร้อย',
+            failureMessage: 'ลบแล้ว แต่ส่งชีตไม่สำเร็จ (เข้า Queue)',
+          }
+        );
+      } else {
+        showToast('ลบเรียบร้อย');
+      }
       setDeleteId(null);
-      showToast('ลบเรียบร้อย');
     } catch (e) {
       console.error(e);
       showToast('❌ ลบไม่สำเร็จ');
@@ -2714,22 +2999,27 @@ export default function App() {
   };
 
   // ── Export
-  const buildExportRows = (month: number, year: number) => {
+  const buildExportRows = (month: number, year: number, brandMode: BrandMode = 'all') => {
     return entries
-      .filter((e) => e.user === currentUser?.uid)
       .filter((e) => {
         const parts = parseDateParts(e.date);
         return parts?.monthIndex === month && parts?.year === year;
+      })
+      .filter((entry) => {
+        const group = kpiConfig[entry.groupId];
+        const task = group?.tasks.find((item) => item.id === entry.taskId);
+        return matchesBrandMode(getEntryBrands(entry, group, task), brandMode);
       })
       .sort((a, b) => a.date.localeCompare(b.date));
   };
 
   // ── TXT รายงาน LINE-friendly (ไม่ใช้ box-drawing chars)
   const handleExportTxt = () => {
-    const filtered = buildExportRows(exportMonth, exportYear);
+    const filtered = buildExportRows(exportMonth, exportYear, summaryBrandMode);
     if (filtered.length === 0) { showToast('ไม่มีข้อมูลในเดือนที่เลือก'); return; }
     const monthName    = getMonthNameThai(exportMonth);
     const yr           = exportYear;
+    const scopeSuffix  = summaryBrandMode === 'all' ? 'ALL' : summaryBrandMode.toUpperCase();
     const totalCredits = filtered.reduce((s, e) => s + e.credits, 0);
     const pct          = Math.round(safePercent(totalCredits, monthlyTarget));
     const role         = userProfile ? (ROLE_DEFAULTS[userProfile.role]?.meta.label || userProfile.role) : '';
@@ -2738,6 +3028,7 @@ export default function App() {
 
     let content = `📊 JATRACK KPI REPORT\n`;
     content += `เดือน: ${monthName} ${yr}\n`;
+    content += `แบรนด์: ${summaryBrandModeLabel}\n`;
     content += `${bar}\n`;
     content += `👤 ${displayName}  |  ${role}\n`;
     content += `🎯 เป้าหมาย: ${monthlyTarget} Credits/เดือน\n`;
@@ -2751,9 +3042,10 @@ export default function App() {
       content += `📁 ${groupRows[0]?.groupName || group?.name || gKey}\n`;
       groupRows.forEach((e, idx) => {
         const task = group?.tasks.find(t => t.id === e.taskId);
+        const entryBrands = getEntryBrands(e, group, task);
         const dd   = e.date.slice(8) + '/' + e.date.slice(5,7);
         content += `  ${idx+1}. [${dd}] ${e.taskName || task?.name || 'Unknown'}\n`;
-        content += `     ${e.quantity} ${e.unit || task?.unit || ''} x ${e.creditPerUnit ?? task?.creditPerUnit ?? 1} Cr = ${e.credits} Cr\n`;
+        content += `     ${getBrandLabel(entryBrands) || '-'} · ${e.quantity} ${e.unit || task?.unit || ''} x ${e.creditPerUnit ?? task?.creditPerUnit ?? 1} Cr = ${e.credits} Cr\n`;
         if (e.notes) content += `     💬 ${e.notes}\n`;
       });
       content += `  รวมกลุ่มนี้: ${gTotal} Credits\n\n`;
@@ -2767,7 +3059,7 @@ export default function App() {
     const blob = new Blob(['\uFEFF' + content], { type: 'text/plain;charset=utf-8' });
     const link = document.createElement('a');
     link.href = URL.createObjectURL(blob);
-    link.download = `Jatrack_${displayName}_${monthName}_${yr}.txt`;
+    link.download = `Jatrack_${displayName}_${monthName}_${yr}_${scopeSuffix}.txt`;
     link.click();
     showToast('ดาวน์โหลด TXT แล้ว ✓');
     setShowExportModal(false);
@@ -2776,7 +3068,7 @@ export default function App() {
   // ── Export to Google Sheets via Sheets API (สร้างใหม่ครั้งแรก / อัปเดตเสมอเมื่อข้อมูลใหม่)
   const handleExportToGoogleSheets = async () => {
     if (sheetsExporting) return;
-    const filtered = buildExportRows(summaryMonth, summaryYear);
+    const filtered = buildExportRows(summaryMonth, summaryYear, summaryBrandMode);
     if (filtered.length === 0) { showToast('ไม่มีข้อมูลในเดือนนี้'); return; }
 
     const token = await ensureDriveAccessToken();
@@ -2785,24 +3077,28 @@ export default function App() {
     setSheetsExporting(true);
     const monthName    = getMonthNameThai(summaryMonth);
     const yr           = summaryYear;
+    const scopeLabel   = summaryBrandModeLabel;
+    const scopeSuffix  = summaryBrandMode === 'all' ? 'ALL' : summaryBrandMode.toUpperCase();
     const totalCredits = filtered.reduce((s, e) => s + e.credits, 0);
     const pct          = Math.round(safePercent(totalCredits, monthlyTarget));
-    const sheetKey     = `sheet_id_${yr}_${summaryMonth}`;
+    const sheetKey     = `sheet_id_${effectiveUid}_${yr}_${summaryMonth}_${summaryBrandMode}`;
     const savedId      = currentUser ? localStorage.getItem(scopedKey(currentUser.uid, sheetKey)) : null;
 
     showToast('⏳ กำลังสร้าง / อัปเดต Google Sheet...');
 
     // Build values (reused for both new + existing)
-    const header = ['#', 'วันที่', 'กลุ่ม', 'Task ID', 'ชื่องาน', 'จำนวน', 'หน่วย', 'Cr/Unit', 'Credits', 'หมายเหตุ', 'Canva Link', 'Drive Link'];
+    const header = ['#', 'วันที่', 'กลุ่ม', 'แบรนด์', 'Task ID', 'ชื่องาน', 'จำนวน', 'หน่วย', 'Cr/Unit', 'Credits', 'หมายเหตุ', 'Canva Link', 'Drive Link'];
     const rows = filtered.map((e, idx) => {
       const g = kpiConfig[e.groupId];
       const t = g?.tasks.find(x => x.id === e.taskId);
-      return [idx + 1, e.date, e.groupName || g?.name || e.groupId, e.taskId, e.taskName || t?.name || '', e.quantity, e.unit || t?.unit || '', e.creditPerUnit ?? t?.creditPerUnit ?? 1, e.credits, e.notes || '', e.canvaLink || '', e.driveLink || ''];
+      const entryBrands = getEntryBrands(e, g, t);
+      return [idx + 1, e.date, e.groupName || g?.name || e.groupId, getBrandLabel(entryBrands) || '', e.taskId, e.taskName || t?.name || '', e.quantity, e.unit || t?.unit || '', e.creditPerUnit ?? t?.creditPerUnit ?? 1, e.credits, e.notes || '', e.canvaLink || '', e.driveLink || ''];
     });
     const summary = [[], [`รวมทั้งหมด`, totalCredits, `Cr`, `${pct}% ของเป้า ${monthlyTarget} Cr`]];
     const values  = [
       [`JATRACK KPI REPORT — ${displayName} — ${monthName} ${yr}`],
       [`Export: ${new Date().toLocaleString('th-TH')}`],
+      [`Brand Scope: ${scopeLabel}`],
       [],
       header,
       ...rows,
@@ -2817,7 +3113,7 @@ export default function App() {
           method: 'POST',
           headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            properties: { title: `Jatrack KPI — ${displayName} ${monthName} ${yr}` },
+            properties: { title: `Jatrack KPI — ${displayName} ${monthName} ${yr} ${scopeSuffix}` },
             sheets: [{ properties: { title: 'KPI Report' } }],
           }),
         });
@@ -2830,7 +3126,7 @@ export default function App() {
         if (currentUser) {
           localStorage.setItem(scopedKey(currentUser.uid, sheetKey), spreadsheetId);
           const url = `https://docs.google.com/spreadsheets/d/${spreadsheetId}`;
-          localStorage.setItem(scopedKey(currentUser.uid, 'sheet_url'), url);
+          if (effectiveUid) localStorage.setItem(scopedKey(effectiveUid, 'sheet_url'), url);
           setSheetUrl(url);
         }
       }
@@ -2867,6 +3163,7 @@ export default function App() {
         `คุณเป็น KPI Analyst ผู้เชี่ยวชาญ วิเคราะห์ผลการทำงาน KPI ต่อไปนี้และสรุปเป็น**ภาษาไทย** สั้น ชัด อ่านง่าย ใน 3-5 ประโยค:\n\n` +
         `ชื่อ: ${displayName} | ตำแหน่ง: ${role}\n` +
         `เดือน: ${monthName} ${summaryYear}\n` +
+        `แบรนด์: ${summaryBrandModeLabel}\n` +
         `ผลรวม: ${summaryData.totalCredits} / ${monthlyTarget} Credits (${Math.round(summaryData.percent)}%)\n` +
         `จำนวนงาน: ${summaryData.entryCount} รายการ\n` +
         `แยกตามกลุ่ม:\n${groupLines || '  (ยังไม่มีข้อมูล)'}`;
@@ -2889,18 +3186,21 @@ export default function App() {
   };
 
   const handleExportCsv = () => {
-    const filtered = buildExportRows(exportMonth, exportYear);
+    const filtered = buildExportRows(exportMonth, exportYear, summaryBrandMode);
     if (filtered.length === 0) { showToast('ไม่มีข้อมูลในเดือนที่เลือก'); return; }
     const monthName = getMonthNameThai(exportMonth);
     const yr        = exportYear;
-    const headers = ['#', 'วันที่', 'กลุ่ม', 'Task ID', 'Task Name', 'จำนวน', 'หน่วย', 'Cr/Unit', 'Credits', 'หมายเหตุ', 'Canva Link', 'Drive Link'];
+    const scopeSuffix = summaryBrandMode === 'all' ? 'ALL' : summaryBrandMode.toUpperCase();
+    const headers = ['#', 'วันที่', 'กลุ่ม', 'แบรนด์', 'Task ID', 'Task Name', 'จำนวน', 'หน่วย', 'Cr/Unit', 'Credits', 'หมายเหตุ', 'Canva Link', 'Drive Link'];
     const rows = filtered.map((e, idx) => {
       const group = kpiConfig[e.groupId];
       const task  = group?.tasks.find((t) => t.id === e.taskId);
+      const entryBrands = getEntryBrands(e, group, task);
       return [
         idx + 1,
         e.date,
         `"${e.groupName || group?.name || e.groupId}"`,
+        `"${getBrandLabel(entryBrands) || ''}"`,
         e.taskId,
         `"${e.taskName || task?.name || 'Unknown'}"`,
         e.quantity,
@@ -2916,7 +3216,7 @@ export default function App() {
     const blob = new Blob(['\uFEFF' + csv], { type: 'text/csv;charset=utf-8' });
     const link = document.createElement('a');
     link.href = URL.createObjectURL(blob);
-    link.download = `Jatrack_${displayName}_${monthName}_${yr}.csv`;
+    link.download = `Jatrack_${displayName}_${monthName}_${yr}_${scopeSuffix}.csv`;
     link.click();
     showToast('ดาวน์โหลด CSV แล้ว ✓');
     setShowExportModal(false);
@@ -2924,10 +3224,11 @@ export default function App() {
 
   // ── Space Sheet Export — professional Google Sheets format
   const handleExportSpaceSheet = () => {
-    const filtered = buildExportRows(exportMonth, exportYear);
+    const filtered = buildExportRows(exportMonth, exportYear, summaryBrandMode);
     if (filtered.length === 0) { showToast('ไม่มีข้อมูลในเดือนที่เลือก'); return; }
     const monthName    = getMonthNameThai(exportMonth);
     const yr           = exportYear;
+    const scopeSuffix  = summaryBrandMode === 'all' ? 'ALL' : summaryBrandMode.toUpperCase();
     const totalCredits = filtered.reduce((s, e) => s + e.credits, 0);
     const pct          = Math.round(safePercent(totalCredits, monthlyTarget));
     const role         = userProfile ? (ROLE_DEFAULTS[userProfile.role]?.meta.label || userProfile.role) : '';
@@ -2939,6 +3240,7 @@ export default function App() {
     rows.push(`${q('JATRACK KPI SPACE SHEET')},${q(`${monthName} ${yr}`)}`);
     rows.push(`${q('Name')},${q(displayName)}`);
     rows.push(`${q('Role')},${q(role)}`);
+    rows.push(`${q('Brand Scope')},${q(summaryBrandModeLabel)}`);
     rows.push(`${q('Monthly Target')},${monthlyTarget},${q('Credits')}`);
     rows.push(`${q('Total Achieved')},${totalCredits},${q(`${pct}% of target`)}`);
     rows.push(`${q('Generated')},${q(new Date().toLocaleString('th-TH'))}`);
@@ -2952,13 +3254,15 @@ export default function App() {
       const gTotal    = groupRows.reduce((s, e) => s + e.credits, 0);
 
       rows.push(`${q(`▸ ${gKey} — ${groupRows[0]?.groupName || group?.name || gKey}`)}`);
-      rows.push(['#', 'Date', 'Task ID', 'Task Name', 'Qty', 'Unit', 'Cr/Unit', 'Credits', 'Notes', 'Canva', 'Drive'].map(q).join(','));
+      rows.push(['#', 'Date', 'Brand', 'Task ID', 'Task Name', 'Qty', 'Unit', 'Cr/Unit', 'Credits', 'Notes', 'Canva', 'Drive'].map(q).join(','));
 
       groupRows.forEach((e, idx) => {
         const task = group?.tasks.find(t => t.id === e.taskId);
+        const entryBrands = getEntryBrands(e, group, task);
         rows.push([
           idx + 1,
           q(e.date),
+          q(getBrandLabel(entryBrands) || ''),
           q(e.taskId),
           q(e.taskName || task?.name || 'Unknown'),
           e.quantity,
@@ -2970,7 +3274,7 @@ export default function App() {
           q(e.driveLink || ''),
         ].join(','));
       });
-      rows.push(`${q('Subtotal')},,,,,,,,${gTotal}`);
+      rows.push([q('Subtotal'), '', '', '', '', '', '', '', gTotal, '', '', ''].join(','));
       rows.push(''); // blank row
     });
 
@@ -2988,24 +3292,24 @@ export default function App() {
       ].join(','));
     });
     rows.push('');
-    rows.push(`${q('GRAND TOTAL')},,,${totalCredits},,,,,${q(`${pct}% / target ${monthlyTarget} Cr.`)}`);
+    rows.push([q('GRAND TOTAL'), '', '', '', '', '', '', '', totalCredits, '', '', q(`${pct}% / target ${monthlyTarget} Cr.`)].join(','));
     rows.push(`${q('Generated by Jatrack · Young Age Corporation Co., Ltd. & Pharvia 2025 Co., Ltd.')}`);
 
     const csv  = rows.join('\n');
     const blob = new Blob(['\uFEFF' + csv], { type: 'text/csv;charset=utf-8' });
     const link = document.createElement('a');
     link.href  = URL.createObjectURL(blob);
-    link.download = `Jatrack_SpaceSheet_${displayName}_${monthName}_${yr}.csv`;
+    link.download = `Jatrack_SpaceSheet_${displayName}_${monthName}_${yr}_${scopeSuffix}.csv`;
     link.click();
     showToast('Space Sheet ดาวน์โหลดแล้ว ✓');
     setShowExportModal(false);
   };
 
   // ── Render guards
-  if (authLoading || profileLoading) return <LoadingScreen />;
-  if (!currentUser) return <SignInScreen onSignIn={handleSignIn} onEmailSignIn={handleEmailSignIn} onEmailRegister={handleEmailRegister} loading={signInLoading} toast={toast} />;
-  if (!userProfile) return <LoadingScreen />;
-  if (!userProfile.nickname?.trim()) {
+  if (authLoading || profileLoading || effectiveProfileLoading) return <LoadingScreen />;
+  if (!currentUser) return <SignInScreen onSignIn={handleSignIn} onEmailSignIn={handleEmailSignIn} loading={signInLoading} toast={toast} />;
+  if (!viewerProfile || !userProfile) return <LoadingScreen />;
+  if (!isActingAs && !viewerProfile.nickname?.trim()) {
     return (
       <NicknameSetupScreen
         defaultValue={currentUser.displayName?.split(' ')[0] || ''}
@@ -3014,8 +3318,8 @@ export default function App() {
     );
   }
 
-  const todayEntries   = entries.filter((e) => e.user === currentUser.uid && e.date === getTodayStr());
-  const historyEntries = entries.filter((e) => e.user === currentUser.uid);
+  const todayEntries   = entries.filter((e) => e.date === getTodayStr());
+  const historyEntries = entries;
   const historyDates   = Array.from<string>(new Set(historyEntries.map((e) => e.date))).sort((a, b) => b.localeCompare(a));
 
   // ─── MAIN APP ───────────────────────────────────────────────────────────────
@@ -3042,7 +3346,7 @@ export default function App() {
                 {editEntry.groupId} · {editEntry.taskId}
               </p>
               <p className="font-bold text-[#2C2A28] text-[14px]">
-                {kpiConfig[editEntry.groupId]?.tasks.find((t) => t.id === editEntry.taskId)?.name}
+                {editEntry.taskName || kpiConfig[editEntry.groupId]?.tasks.find((t) => t.id === editEntry.taskId)?.name}
               </p>
             </div>
             <div className="flex items-center justify-between gap-4 bg-slate-50 border border-slate-100 p-2 rounded-2xl">
@@ -3153,7 +3457,26 @@ export default function App() {
 
       {/* Export Modal */}
       <Modal isOpen={showExportModal} onClose={() => setShowExportModal(false)} title="ส่งออกรายงาน">
-        <div className="space-y-4">
+          <div className="space-y-4">
+          <div className="space-y-1.5">
+            <p className="text-[9px] font-bold text-slate-400 uppercase tracking-widest">แบรนด์ที่ส่งออก</p>
+            <div className="inline-flex items-center gap-1 rounded-full bg-slate-100 p-1">
+              {(['all', 'y8', 'pv'] as const).map((mode) => (
+                <button
+                  key={mode}
+                  type="button"
+                  onClick={() => setSummaryBrandMode(mode)}
+                  className="px-3 py-1.5 rounded-full text-[10px] font-black tracking-wide transition-all"
+                  style={{
+                    background: summaryBrandMode === mode ? 'linear-gradient(135deg, #F4823C, #F5A855)' : 'transparent',
+                    color: summaryBrandMode === mode ? 'white' : '#64748B',
+                  }}
+                >
+                  {mode === 'all' ? 'All' : mode.toUpperCase()}
+                </button>
+              ))}
+            </div>
+          </div>
           {/* Month picker */}
           <div>
             <p className="text-[9px] font-bold text-slate-400 uppercase tracking-widest mb-2">เลือกเดือน</p>
@@ -3195,9 +3518,9 @@ export default function App() {
             </div>
             <div>
               <p className="text-[11px] font-bold text-[#2C2A28]">
-                {buildExportRows(exportMonth, exportYear).length} รายการ · {buildExportRows(exportMonth, exportYear).reduce((s,e)=>s+e.credits,0)} Cr.
+                {buildExportRows(exportMonth, exportYear, summaryBrandMode).length} รายการ · {buildExportRows(exportMonth, exportYear, summaryBrandMode).reduce((s,e)=>s+e.credits,0)} Cr.
               </p>
-              <p className="text-[9px] text-slate-400">{getMonthNameThai(exportMonth)} {exportYear}</p>
+              <p className="text-[9px] text-slate-400">{getMonthNameThai(exportMonth)} {exportYear} · {summaryBrandModeLabel}</p>
             </div>
           </div>
 
@@ -3266,6 +3589,23 @@ export default function App() {
               <p className="text-[10px] text-slate-400 truncate">{currentUser.email}</p>
             </div>
           </div>
+
+          {isActingAs && (
+            <div className="px-4 py-3 rounded-2xl bg-violet-50 border border-violet-100 flex items-center justify-between gap-3">
+              <div>
+                <p className="text-[9px] font-bold text-violet-600 uppercase tracking-widest">Acting As User</p>
+                <p className="text-[12px] font-bold text-[#2C2A28] truncate">{displayName}</p>
+                <p className="text-[10px] text-violet-500 truncate">{userProfile?.email || effectiveUid}</p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setActingAsUid(null)}
+                className="px-3 py-2 rounded-xl bg-white text-violet-600 text-[11px] font-bold border border-violet-100"
+              >
+                Return
+              </button>
+            </div>
+          )}
 
           {/* Nickname */}
           <div className="space-y-1.5">
@@ -3460,6 +3800,49 @@ export default function App() {
             Role ถูกกำหนดตามอีเมลอัตโนมัติ: host = Graphic Designer, info.nakoleo = Art Director (Admin), อื่นๆ = Custom
           </div>
 
+          <div className="space-y-2 rounded-2xl border border-slate-100 bg-white px-4 py-4">
+            <div>
+              <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Password Login</p>
+              <p className="text-[11px] text-slate-500 mt-1">
+                ใช้กับบัญชี Google ที่ล็อกอินอยู่: {currentUser.email}
+              </p>
+              <p className="text-[10px] text-slate-400 mt-1">
+                ต้องเข้า Google อย่างน้อย 1 ครั้งก่อน จากนั้นจึงตั้งรหัสผ่านเพื่อ login เองได้
+              </p>
+            </div>
+            {hasPasswordLogin && (
+              <input
+                type="password"
+                value={currentPasswordDraft}
+                onChange={(e) => setCurrentPasswordDraft(e.target.value)}
+                placeholder="รหัสผ่านปัจจุบัน"
+                className="w-full px-4 py-3 bg-slate-50 border border-slate-100 rounded-2xl text-[13px] outline-none"
+              />
+            )}
+            <input
+              type="password"
+              value={newPasswordDraft}
+              onChange={(e) => setNewPasswordDraft(e.target.value)}
+              placeholder={hasPasswordLogin ? 'รหัสผ่านใหม่' : 'ตั้งรหัสผ่านใหม่'}
+              className="w-full px-4 py-3 bg-slate-50 border border-slate-100 rounded-2xl text-[13px] outline-none"
+            />
+            <input
+              type="password"
+              value={confirmPasswordDraft}
+              onChange={(e) => setConfirmPasswordDraft(e.target.value)}
+              placeholder="ยืนยันรหัสผ่านใหม่"
+              className="w-full px-4 py-3 bg-slate-50 border border-slate-100 rounded-2xl text-[13px] outline-none"
+            />
+            <button
+              type="button"
+              onClick={() => void handleSavePassword()}
+              disabled={passwordSaving || !newPasswordDraft.trim() || !confirmPasswordDraft.trim() || (hasPasswordLogin && !currentPasswordDraft.trim())}
+              className="w-full py-3 rounded-2xl bg-slate-50 border border-slate-200 text-[12px] font-bold text-[#2C2A28] disabled:opacity-60"
+            >
+              {passwordSaving ? 'กำลังบันทึก...' : hasPasswordLogin ? 'เปลี่ยนรหัสผ่าน' : 'ตั้งรหัสผ่าน'}
+            </button>
+          </div>
+
           {/* KPI Config button (Phase 4/5) */}
           <button
             onClick={() => { setShowSettings(false); setShowKpiEditor(true); }}
@@ -3513,41 +3896,53 @@ export default function App() {
             </button>
           </div>
 
-          <div className="flex gap-3">
+          <div className={`grid gap-3 ${isSuperAdmin ? 'grid-cols-[1fr_1fr_2fr]' : 'grid-cols-[1fr_2fr]'}`}>
             <button
               onClick={handleSignOut}
               className="flex-1 py-4 bg-rose-50 text-rose-500 rounded-2xl font-bold text-[13px] border border-rose-100 flex items-center justify-center gap-2"
             >
               <LogOut size={15} /> Logout
             </button>
+            {isSuperAdmin && (
+              <button
+                type="button"
+                onClick={() => setShowSwitchUserModal(true)}
+                className="flex-1 py-4 bg-violet-50 text-violet-600 rounded-2xl font-bold text-[13px] border border-violet-100 flex items-center justify-center gap-2"
+              >
+                <UserCircle size={15} /> Switch User
+              </button>
+            )}
             <button
               onClick={async () => {
-                if (!currentUser) return;
+                if (!currentUser || !effectiveUid) return;
                 const ok = await handleSaveNickname(nicknameDraft);
                 if (!ok) return;
-                localStorage.setItem(scopedKey(currentUser.uid, 'sheet_url'), sheetUrl.trim());
+                const nextSettings: StoredUserSettings = {
+                  autoHoverExpand,
+                  calY8Url: calY8Url.trim(),
+                  calPvUrl: calPvUrl.trim(),
+                  driveFolderId: driveFolderId.trim(),
+                  sheetUrl: sheetUrl.trim(),
+                };
+                persistLocalUserSettings(effectiveUid, nextSettings);
                 // Only super admin can override the webhook URL
-                if (isSuperAdmin) {
+                if (isSuperAdmin && effectiveUid === currentUser.uid) {
                   localStorage.setItem(scopedKey(currentUser.uid, 'sheets_webhook'), sheetsWebhookUrl.trim());
                 }
                 localStorage.setItem(scopedKey(currentUser.uid, 'gemini_api_key'), geminiApiKey.trim());
                 // ── Persist settings + customTitle to Firestore
                 try {
                   const titleVal = customTitleDraft.trim() || null;
-                  await setDoc(doc(db, 'users', currentUser.uid), {
+                  await setDoc(doc(db, 'users', effectiveUid), {
                     customTitle: titleVal,
-                    settings: {
-                      autoHoverExpand,
-                      calY8Url:      calY8Url.trim(),
-                      calPvUrl:      calPvUrl.trim(),
-                      driveFolderId: driveFolderId.trim(),
-                      sheetUrl:      sheetUrl.trim(),
-                    },
+                    settings: nextSettings,
                     updatedAt: Date.now(),
                   }, { merge: true });
                   setUserProfile(prev => prev ? { ...prev, customTitle: titleVal || undefined,
-                    settings: { autoHoverExpand, calY8Url: calY8Url.trim(), calPvUrl: calPvUrl.trim(),
-                      driveFolderId: driveFolderId.trim(), sheetUrl: sheetUrl.trim() } } : prev);
+                    settings: nextSettings } : prev);
+                  if (effectiveUid === currentUser.uid) {
+                    setViewerProfile(prev => prev ? { ...prev, customTitle: titleVal || undefined, settings: nextSettings } : prev);
+                  }
                 } catch { /* non-critical */ }
                 setShowSettings(false);
                 showToast('บันทึก Config แล้ว');
@@ -3557,6 +3952,47 @@ export default function App() {
             >
               Save
             </button>
+          </div>
+        </div>
+      </Modal>
+
+      <Modal isOpen={showSwitchUserModal} onClose={() => setShowSwitchUserModal(false)} title="Switch User">
+        <div className="space-y-3">
+          <button
+            type="button"
+            onClick={() => {
+              setActingAsUid(null);
+              setShowSwitchUserModal(false);
+            }}
+            className={`w-full px-4 py-3 rounded-2xl border text-left ${!isActingAs ? 'bg-violet-50 border-violet-200' : 'bg-slate-50 border-slate-100'}`}
+          >
+            <p className="text-[12px] font-bold text-[#2C2A28]">Return to Admin</p>
+            <p className="text-[10px] text-slate-400 mt-1">{viewerProfile?.nickname || viewerProfile?.displayName || currentUser?.email}</p>
+          </button>
+          <div className="space-y-2">
+            {adminProfiles
+              .filter((profile) => profile.uid !== currentUser?.uid)
+              .sort((a, b) => (a.nickname || a.displayName || '').localeCompare(b.nickname || b.displayName || ''))
+              .map((profile) => {
+                const active = actingAsUid === profile.uid;
+                return (
+                  <button
+                    key={profile.uid}
+                    type="button"
+                    onClick={() => {
+                      setActingAsUid(profile.uid);
+                      setShowSwitchUserModal(false);
+                      setShowSettings(false);
+                    }}
+                    className={`w-full px-4 py-3 rounded-2xl border text-left transition-colors ${active ? 'bg-violet-50 border-violet-200' : 'bg-slate-50 border-slate-100'}`}
+                  >
+                    <p className="text-[12px] font-bold text-[#2C2A28]">
+                      {profile.nickname || profile.displayName || profile.email}
+                    </p>
+                    <p className="text-[10px] text-slate-400 mt-1">{profile.email}</p>
+                  </button>
+                );
+              })}
           </div>
         </div>
       </Modal>
@@ -3596,6 +4032,22 @@ export default function App() {
             </button>
           </div>
         </div>
+
+        {isActingAs && (
+          <div className="mb-3 flex items-center justify-between gap-3 rounded-[18px] border border-violet-200 bg-white/70 px-4 py-3 backdrop-blur-md">
+            <div className="min-w-0">
+              <p className="text-[8px] font-bold uppercase tracking-widest text-violet-500">Acting As</p>
+              <p className="text-[12px] font-bold text-[#2C2A28] truncate">{displayName}</p>
+            </div>
+            <button
+              type="button"
+              onClick={() => setActingAsUid(null)}
+              className="shrink-0 rounded-xl bg-violet-50 px-3 py-2 text-[10px] font-bold text-violet-600"
+            >
+              Return
+            </button>
+          </div>
+        )}
 
         <div className="grid grid-cols-2 gap-2">
           <div className="bg-white/60 backdrop-blur-md px-4 py-3 rounded-[20px] border border-white/80">
@@ -3668,19 +4120,17 @@ export default function App() {
                       <div className="rounded-[18px] border border-dashed border-orange-200 bg-orange-50/70 px-4 py-4">
                         <p className="text-[11px] font-bold text-[#F4823C]">ไม่มีกลุ่ม KPI สำหรับ {logBrandModeLabel}</p>
                         <p className="text-[10px] text-slate-500 mt-1">
-                          ไปที่ KPI Config แล้วติ๊กแบรนด์ให้กลุ่มงาน หรือสลับกลับเป็น All เพื่อดูทั้งหมด
+                          ไปที่ KPI Config แล้วติ๊กแบรนด์ให้รายการงาน หรือสลับกลับเป็น All เพื่อดูทั้งหมด
                         </p>
                       </div>
                     )}
                     {visibleLogGroupKeys.map((key) => {
                       const grp        = kpiConfig[key];
+                      const visibleTasks = getVisibleTasksForGroup(grp, logBrandMode);
                       const isActive   = selectedGroup === key;
                       const isExpanded = expandedGroups.has(key) || (autoHoverExpand && hoveredGroup === key);
-                      const hasY8 = grp.brands?.includes('y8');
-                      const hasPv = grp.brands?.includes('pv');
-                      const brandLabel = hasY8 && hasPv ? 'Y8-PV' : hasY8 ? 'Y8' : hasPv ? 'PV' : null;
-                      const brandBg    = hasY8 && hasPv ? 'linear-gradient(90deg,#FEF3E2,#FDE8F2)' : hasY8 ? '#FEF3E2' : '#FDE8F2';
-                      const brandColor = hasY8 && hasPv ? '#9D5C1A' : hasY8 ? '#F4823C' : '#E87AA5';
+                      const brandLabel = getBrandLabel(grp.brands);
+                      const brandChipStyle = getBrandChipStyle(grp.brands);
                       return (
                         <div key={key}
                           className="rounded-[16px] overflow-hidden border transition-all duration-200"
@@ -3692,7 +4142,7 @@ export default function App() {
                           <button className="w-full flex items-center gap-2 px-3 py-2.5 text-left"
                             onClick={() => {
                               setSelectedGroup(key);
-                              setSelectedTaskId(grp.tasks[0]?.id || '');
+                              setSelectedTaskId(visibleTasks[0]?.id || '');
                               setExpandedGroups(prev => {
                                 const s = new Set(prev);
                                 s.has(key) ? s.delete(key) : s.add(key);
@@ -3709,12 +4159,12 @@ export default function App() {
                                 <p className="text-[12px] font-bold text-[#2C2A28] truncate">{grp.name}</p>
                                 {brandLabel && (
                                   <span className="text-[7px] px-1.5 py-0.5 rounded font-bold shrink-0"
-                                    style={{ background: brandBg, color: brandColor }}>
+                                    style={brandChipStyle}>
                                     {brandLabel}
                                   </span>
                                 )}
                               </div>
-                              <p className="text-[9px] text-slate-400">{grp.tasks.length} งาน</p>
+                              <p className="text-[9px] text-slate-400">{visibleTasks.length} งาน</p>
                             </div>
                             <ChevronDown size={14}
                               className="text-slate-300 shrink-0 transition-transform duration-200"
@@ -3724,13 +4174,13 @@ export default function App() {
 
                           {/* Task list — smooth height animation */}
                           <div style={{
-                            maxHeight: isExpanded ? `${grp.tasks.length * 80 + 60}px` : '0px',
+                            maxHeight: isExpanded ? `${visibleTasks.length * 96 + 60}px` : '0px',
                             overflow: 'hidden',
                             transition: 'max-height 0.35s cubic-bezier(0.4,0,0.2,1)',
                           }}>
                             <div className="px-3 pb-2.5 space-y-1.5 border-t" style={{ borderColor: `${grp.color}33` }}>
                               <p className="text-[8px] font-bold text-slate-400 uppercase tracking-widest pt-2">เลือกงาน</p>
-                              {grp.tasks.map((t) => (
+                              {visibleTasks.map((t) => (
                                 <button key={t.id}
                                   onClick={() => { setSelectedTaskId(t.id); setSelectedGroup(key); }}
                                   className="w-full flex items-center justify-between px-3 py-2 rounded-xl transition-all text-left"
@@ -3740,8 +4190,18 @@ export default function App() {
                                     border: `1px solid ${selectedTaskId === t.id && isActive ? grp.color : 'rgb(241 245 249)'}`,
                                   }}>
                                   <div className="min-w-0">
-                                    <span className="text-[10px] font-black opacity-70 mr-1">[{t.id}]</span>
-                                    <span className="text-[12px] font-semibold">{t.name}</span>
+                                    <div className="flex items-center gap-1.5 min-w-0">
+                                      <span className="text-[10px] font-black opacity-70 mr-1">[{t.id}]</span>
+                                      <span className="text-[12px] font-semibold truncate">{t.name}</span>
+                                      {getBrandLabel(getTaskBrands(t, grp)) && (
+                                        <span
+                                          className="text-[7px] px-1.5 py-0.5 rounded font-black shrink-0"
+                                          style={getBrandChipStyle(getTaskBrands(t, grp))}
+                                        >
+                                          {getBrandLabel(getTaskBrands(t, grp))}
+                                        </span>
+                                      )}
+                                    </div>
                                   </div>
                                   <span className="shrink-0 text-[11px] font-black ml-2 opacity-80">
                                     {t.creditPerUnit} Cr/{t.unit}
@@ -4020,11 +4480,32 @@ export default function App() {
               </button>
             </div>
 
+            <div className="flex items-center justify-between gap-3 bg-white rounded-[18px] px-3 py-2.5 border border-slate-100 shadow-sm">
+              <p className="text-[9px] font-bold text-slate-400 uppercase tracking-widest">Brand Filter</p>
+              <div className="inline-flex items-center gap-1 rounded-full bg-slate-100 p-1">
+                {(['all', 'y8', 'pv'] as const).map((mode) => (
+                  <button
+                    key={mode}
+                    type="button"
+                    onClick={() => setSummaryBrandMode(mode)}
+                    className="px-3 py-1.5 rounded-full text-[10px] font-black tracking-wide transition-all"
+                    style={{
+                      background: summaryBrandMode === mode ? 'linear-gradient(135deg, #F4823C, #F5A855)' : 'transparent',
+                      color: summaryBrandMode === mode ? 'white' : '#64748B',
+                    }}
+                  >
+                    {mode === 'all' ? 'All' : mode.toUpperCase()}
+                  </button>
+                ))}
+              </div>
+            </div>
+
             {/* Main Progress Card */}
             <section className="bg-white p-5 rounded-[24px] border border-slate-100 shadow-sm">
               <div className="flex justify-between items-start mb-4">
                 <div>
                   <p className="text-[9px] font-bold text-slate-400 uppercase tracking-widest mb-1">Progress</p>
+                  <p className="text-[9px] text-slate-300 mb-1">{summaryBrandModeLabel}</p>
                   <div className="flex items-end gap-2">
                     <p className="text-[38px] font-light text-[#2C2A28] leading-none">{summaryData.totalCredits}</p>
                     <p className="text-[14px] text-slate-300 mb-0.5">/ {monthlyTarget} Cr.</p>
@@ -4101,6 +4582,7 @@ export default function App() {
               <div className="text-center py-12 bg-white rounded-[24px] border border-dashed border-slate-200">
                 <BarChart3 size={26} className="text-slate-200 mx-auto mb-3" />
                 <p className="text-slate-300 text-[11px] font-bold uppercase tracking-widest">ไม่มีข้อมูลในเดือนนี้</p>
+                <p className="text-[10px] text-slate-300 mt-1">{summaryBrandModeLabel}</p>
               </div>
             )}
 
@@ -4377,20 +4859,15 @@ export default function App() {
             onClick={async () => {
               setDriveTreeLoading(true);
               try {
-                await fetch(sheetsWebhookUrl, {
-                  method: 'POST',
-                  mode: 'no-cors',
-                  headers: { 'Content-Type': 'application/json' },
-                  body: JSON.stringify({
-                    action: 'sync_drive_folders',
-                    rootFolderId: driveFolderId.trim(),
-                    groups: orderedGroupKeys.map(k => ({
-                      key: k,
-                      name: kpiConfig[k].name,
-                      brands: kpiConfig[k].brands || [],
-                      icon: kpiConfig[k].icon || k,
-                    })),
-                  }),
+                await postSheetsWebhook({
+                  action: 'sync_drive_folders',
+                  rootFolderId: driveFolderId.trim(),
+                  groups: orderedGroupKeys.map(k => ({
+                    key: k,
+                    name: kpiConfig[k].name,
+                    brands: kpiConfig[k].brands || [],
+                    icon: kpiConfig[k].icon || k,
+                  })),
                 });
                 showToast('ส่งคำสั่งสร้างโฟลเดอร์ไปยัง GAS แล้ว ✓');
                 setShowDriveTreeModal(false);
