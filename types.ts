@@ -1,4 +1,6 @@
 
+export type BrandId = 'y8' | 'pv';
+
 export interface Task {
   id: string;
   name: string;
@@ -11,6 +13,7 @@ export interface Task {
   related?: string;
   qtyConversion?: string;
   type?: 'fixed' | 'quality';
+  brands?: BrandId[];        // which brand(s) this task belongs to
 }
 
 export interface WorkGroup {
@@ -20,7 +23,7 @@ export interface WorkGroup {
   bg: string;
   border?: string;
   icon?: string;              // custom emoji/symbol (fallback = group key letter)
-  brands?: ('y8' | 'pv')[];  // which brands this group serves (Y8 / PV / both)
+  brands?: BrandId[];         // legacy group-level brand source / aggregate
   tasks: Task[];
 }
 
@@ -52,11 +55,17 @@ export interface WorkEntry {
   userName?: string;   // Display name (for export)
   role?: string;       // Role at time of entry
   groupId: string;
+  groupName?: string;  // Group label at time of entry
   taskId: string;
+  taskName?: string;   // Task label at time of entry
   quantity: number;
+  unit?: string;       // Unit at time of entry
+  creditPerUnit?: number; // Credits per unit at time of entry
+  brands?: BrandId[];  // Brand snapshot at time of entry
   credits: number;
   notes: string;
   createdAt: number;
+  channel?: string;    // Channel metadata at time of entry
   canvaLink?:    string;              // Canva presentation/board URL
   driveLink?:    string;              // Drive link (backward compat / manual paste)
   attachments?:  DriveAttachment[];   // Multi-file Drive uploads

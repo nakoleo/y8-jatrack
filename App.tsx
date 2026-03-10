@@ -19,7 +19,7 @@ import {
 } from 'firebase/auth';
 import { db, auth, googleProvider, createDriveProvider, firebaseApp } from './firebase';
 import { WORK_GROUPS } from './constants';
-import { WorkEntry, WorkGroup, WorkGroups, TabType, UserProfile, RoleId, DriveAttachment, LocalFileRef } from './types';
+import { WorkEntry, WorkGroup, WorkGroups, TabType, UserProfile, RoleId, DriveAttachment, LocalFileRef, BrandId, Task } from './types';
 import { ROLE_DEFAULTS, ROLE_EMOJI } from './roleDefaults';
 
 // ─── HELPERS ─────────────────────────────────────────────────────────────────
@@ -28,6 +28,8 @@ const SUPER_ADMIN_EMAIL = 'info.nakoleo@gmail.com';
 const KPI_POLICY_VERSION = 3;
 const EXPECTED_FIREBASE_PROJECT = 'jartrack-y8pv';
 const EXPECTED_FIREBASE_AUTH_DOMAIN = 'jartrack-y8pv.firebaseapp.com';
+const BRAND_OPTIONS: BrandId[] = ['y8', 'pv'];
+type BrandMode = 'all' | BrandId;
 
 const ZERO_STARTER_GROUPS: WorkGroups = {
   A: {
@@ -50,12 +52,77 @@ const resolveRoleByEmail = (email?: string | null): RoleId =>
 
 const cloneGroups = (groups: WorkGroups): WorkGroups => JSON.parse(JSON.stringify(groups));
 
+const normalizeBrands = (brands?: BrandId[] | null): BrandId[] =>
+  BRAND_OPTIONS.filter((brand) => (brands || []).includes(brand));
+
+const getBrandLabel = (brands?: BrandId[] | null) => {
+  const normalized = normalizeBrands(brands);
+  const hasY8 = normalized.includes('y8');
+  const hasPv = normalized.includes('pv');
+  if (hasY8 && hasPv) return 'Y8-PV';
+  if (hasY8) return 'Y8';
+  if (hasPv) return 'PV';
+  return null;
+};
+
+const getBrandChipStyle = (brands?: BrandId[] | null) => {
+  const normalized = normalizeBrands(brands);
+  const hasY8 = normalized.includes('y8');
+  const hasPv = normalized.includes('pv');
+  return {
+    bg: hasY8 && hasPv ? 'linear-gradient(90deg,#FEF3E2,#FDE8F2)' : hasY8 ? '#FEF3E2' : '#FDE8F2',
+    color: hasY8 && hasPv ? '#9D5C1A' : hasY8 ? '#F4823C' : '#E87AA5',
+  };
+};
+
+const getTaskBrands = (task?: Partial<Task> | null, group?: Partial<WorkGroup> | null): BrandId[] => {
+  const taskBrands = normalizeBrands(task?.brands as BrandId[] | undefined);
+  if (taskBrands.length > 0) return taskBrands;
+  return normalizeBrands(group?.brands as BrandId[] | undefined);
+};
+
+const matchesBrandMode = (brands: BrandId[], mode: BrandMode) =>
+  mode === 'all' || brands.includes(mode);
+
+const migrateWorkGroups = (groups: WorkGroups): WorkGroups => {
+  const next = cloneGroups(groups);
+  Object.values(next).forEach((group) => {
+    group.tasks = group.tasks.map((task) => ({
+      ...task,
+      brands: getTaskBrands(task, group),
+    }));
+    group.brands = normalizeBrands(group.tasks.flatMap((task) => task.brands || []));
+  });
+  return next;
+};
+
+const getVisibleTasksForGroup = (group: WorkGroup | undefined, mode: BrandMode) => {
+  if (!group) return [] as Task[];
+  return group.tasks.filter((task) => matchesBrandMode(getTaskBrands(task, group), mode));
+};
+
 const getTodayStr = () => {
   const now = new Date();
   const y = now.getFullYear();
   const m = String(now.getMonth() + 1).padStart(2, '0');
   const d = String(now.getDate()).padStart(2, '0');
   return `${y}-${m}-${d}`;
+};
+
+const parseDateParts = (dateStr: string) => {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(dateStr);
+  if (!match) return null;
+  const year = Number(match[1]);
+  const monthIndex = Number(match[2]) - 1;
+  const day = Number(match[3]);
+  if (Number.isNaN(year) || Number.isNaN(monthIndex) || Number.isNaN(day)) return null;
+  return { year, monthIndex, day };
+};
+
+const parseLocalDate = (dateStr: string) => {
+  const parts = parseDateParts(dateStr);
+  if (!parts) return null;
+  return new Date(parts.year, parts.monthIndex, parts.day);
 };
 
 const dateToLocalStr = (date: Date) => {
@@ -92,14 +159,14 @@ const getInitialKpiForEmail = (email?: string | null) => {
   if (isHostEmail(email)) {
     const graphic = ROLE_DEFAULTS.graphic_designer;
     return {
-      groups: cloneGroups(graphic.groups),
+      groups: migrateWorkGroups(graphic.groups),
       monthlyTarget: graphic.meta.monthlyTarget,
       roleId: 'graphic_designer',
       label: graphic.meta.label,
     };
   }
   return {
-    groups: cloneGroups(ZERO_STARTER_GROUPS),
+    groups: migrateWorkGroups(ZERO_STARTER_GROUPS),
     monthlyTarget: 0,
     roleId: resolveRoleByEmail(email),
     label: 'Custom',
@@ -111,8 +178,8 @@ const scopedKey = (uid: string, key: string) => `jartrack_${uid}_${key}`;
 const formatThaiDate = (dateStr: string, full = false) => {
   if (!dateStr) return '';
   try {
-    const date = new Date(dateStr + 'T00:00:00');
-    if (isNaN(date.getTime())) return dateStr;
+    const date = parseLocalDate(dateStr);
+    if (!date || isNaN(date.getTime())) return dateStr;
     return date.toLocaleDateString('th-TH', {
       day: 'numeric',
       month: full ? 'long' : 'short',
@@ -545,6 +612,8 @@ function EntryCard({
 }) {
   const group = workGroups[entry.groupId];
   const task  = group?.tasks.find((tk) => tk.id === entry.taskId);
+  const taskName = entry.taskName || task?.name || 'Unknown';
+  const unitLabel = entry.unit || task?.unit || 'หน่วย';
 
   // ── Swipe-to-delete
   const [swipeOffset, setSwipeOffset] = useState(0);
@@ -590,9 +659,9 @@ function EntryCard({
           {group?.icon || entry.groupId.slice(0, 1)}
         </div>
         <div className="flex-1 min-w-0">
-          <p className="font-bold text-[#2C2A28] text-[13px] leading-tight truncate">{task?.name || 'Unknown'}</p>
+          <p className="font-bold text-[#2C2A28] text-[13px] leading-tight truncate">{taskName}</p>
           <p className="text-[10px] text-slate-300 font-semibold uppercase tracking-wider mt-0.5">
-            {entry.quantity} {task?.unit || 'หน่วย'} ·{' '}
+            {entry.quantity} {unitLabel} ·{' '}
             <span className="text-[#F4823C]">{entry.credits} Cr.</span>
           </p>
           {entry.notes ? (
@@ -740,11 +809,23 @@ function KpiEditor({
   const updateGroupIcon = (gKey: string, icon: string) =>
     setDraft(prev => ({ ...prev, [gKey]: { ...prev[gKey], icon: icon || undefined } }));
 
-  const toggleGroupBrand = (gKey: string, brand: 'y8' | 'pv', checked: boolean) =>
+  const toggleTaskBrand = (gKey: string, taskId: string, brand: BrandId, checked: boolean) =>
     setDraft(prev => {
-      const cur = prev[gKey].brands || [];
-      const next = checked ? ([...cur, brand] as ('y8' | 'pv')[]) : cur.filter(b => b !== brand);
-      return { ...prev, [gKey]: { ...prev[gKey], brands: next } };
+      const group = prev[gKey];
+      const tasks = group.tasks.map((task) => {
+        if (task.id !== taskId) return task;
+        const cur = getTaskBrands(task, group);
+        const next = checked ? normalizeBrands([...cur, brand]) : cur.filter((b) => b !== brand);
+        return { ...task, brands: next };
+      });
+      return {
+        ...prev,
+        [gKey]: {
+          ...group,
+          tasks,
+          brands: normalizeBrands(tasks.flatMap((task) => task.brands || [])),
+        },
+      };
     });
 
   // ── Task CRUD
@@ -768,7 +849,14 @@ function KpiEditor({
       ...prev,
       [gKey]: {
         ...prev[gKey],
-        tasks: [...prev[gKey].tasks, { id: newId, name: 'New Task', creditPerUnit: 1, unit: 'Artwork', desc: '' }],
+        tasks: [...prev[gKey].tasks, {
+          id: newId,
+          name: 'New Task',
+          creditPerUnit: 1,
+          unit: 'Artwork',
+          desc: '',
+          brands: normalizeBrands(prev[gKey].brands),
+        }],
       },
     }));
   };
@@ -793,7 +881,7 @@ function KpiEditor({
         color: palette.color,
         bg: palette.bg,
         border: palette.bg,
-        tasks: [{ id: `${key}-01`, name: 'New Task', creditPerUnit: 1, unit: 'Artwork', desc: '' }],
+        tasks: [{ id: `${key}-01`, name: 'New Task', creditPerUnit: 1, unit: 'Artwork', desc: '', brands: [] }],
       },
     }));
     setExpandedGroup(key);
@@ -928,25 +1016,18 @@ function KpiEditor({
                   ) : (
                     <p className="font-bold text-[#2C2A28] text-[13px] truncate">{group.name}</p>
                   )}
-                  {/* Brand chips */}
+                  {/* Group brand summary */}
                   <div className="flex items-center gap-2 mt-0.5">
-                    {(['y8', 'pv'] as const).map(brand => (
-                      <label
-                        key={brand}
-                        className="flex items-center gap-1 text-[10px] cursor-pointer select-none"
-                        onClick={e => e.stopPropagation()}
+                    {getBrandLabel(group.brands) ? (
+                      <span
+                        className="text-[8px] px-1.5 py-0.5 rounded font-black shrink-0"
+                        style={getBrandChipStyle(group.brands)}
                       >
-                        <input
-                          type="checkbox"
-                          checked={(group.brands || []).includes(brand)}
-                          onChange={e => toggleGroupBrand(key, brand, e.target.checked)}
-                          className="w-3 h-3 accent-[#F4823C]"
-                        />
-                        <span className="font-bold" style={{ color: brand === 'y8' ? '#F4823C' : '#E87AA5' }}>
-                          {brand === 'y8' ? 'Y8' : 'PV'}
-                        </span>
-                      </label>
-                    ))}
+                        {getBrandLabel(group.brands)}
+                      </span>
+                    ) : (
+                      <span className="text-[9px] text-slate-300">ยังไม่ได้กำหนดแบรนด์</span>
+                    )}
                     <span className="text-[9px] text-slate-300">{group.tasks.length} รายการ</span>
                   </div>
                 </div>
@@ -995,21 +1076,31 @@ function KpiEditor({
               <div className="px-4 pb-4 pt-3 space-y-2.5">
                 {group.tasks.map((task) => (
                   <div key={task.id} className="bg-[#FDFAF7] rounded-[14px] p-3 space-y-2.5 border border-slate-100">
-                    <div className="flex items-center justify-between">
+                    <div className="flex items-center justify-between gap-2">
                       <span
                         className="text-[9px] font-black uppercase tracking-widest px-2 py-0.5 rounded-md"
                         style={{ backgroundColor: group.bg, color: group.color }}
                       >
                         {task.id}
                       </span>
-                      {group.tasks.length > 1 && (
-                        <button
-                          onClick={() => deleteTask(key, task.id)}
-                          className="w-6 h-6 flex items-center justify-center text-rose-300 active:text-rose-500 transition-colors"
-                        >
-                          <Trash2 size={12} />
-                        </button>
-                      )}
+                      <div className="flex items-center gap-1.5">
+                        {getBrandLabel(getTaskBrands(task, group)) && (
+                          <span
+                            className="text-[8px] px-1.5 py-0.5 rounded font-black shrink-0"
+                            style={getBrandChipStyle(getTaskBrands(task, group))}
+                          >
+                            {getBrandLabel(getTaskBrands(task, group))}
+                          </span>
+                        )}
+                        {group.tasks.length > 1 && (
+                          <button
+                            onClick={() => deleteTask(key, task.id)}
+                            className="w-6 h-6 flex items-center justify-center text-rose-300 active:text-rose-500 transition-colors"
+                          >
+                            <Trash2 size={12} />
+                          </button>
+                        )}
+                      </div>
                     </div>
                     <input
                       type="text"
@@ -1025,6 +1116,27 @@ function KpiEditor({
                       className="w-full px-3 py-2 bg-white border border-slate-200 rounded-xl text-[11px] text-slate-400 outline-none focus:border-orange-300"
                       placeholder="คำอธิบาย (ไม่บังคับ)"
                     />
+                    <div className="space-y-1">
+                      <label className="text-[8px] font-bold text-slate-400 uppercase tracking-widest">แบรนด์</label>
+                      <div className="flex items-center gap-2">
+                        {BRAND_OPTIONS.map((brand) => (
+                          <label
+                            key={brand}
+                            className="flex items-center gap-1 text-[10px] cursor-pointer select-none bg-white border border-slate-200 rounded-full px-2 py-1"
+                          >
+                            <input
+                              type="checkbox"
+                              checked={getTaskBrands(task, group).includes(brand)}
+                              onChange={(e) => toggleTaskBrand(key, task.id, brand, e.target.checked)}
+                              className="w-3 h-3 accent-[#F4823C]"
+                            />
+                            <span className="font-bold" style={{ color: brand === 'y8' ? '#F4823C' : '#E87AA5' }}>
+                              {brand === 'y8' ? 'Y8' : 'PV'}
+                            </span>
+                          </label>
+                        ))}
+                      </div>
+                    </div>
                     <div className="grid grid-cols-3 gap-2">
                       <div className="col-span-1 space-y-1">
                         <label className="text-[8px] font-bold text-slate-400 uppercase tracking-widest">Cr/Unit</label>
@@ -1318,8 +1430,6 @@ const NicknameSetupScreen = ({
 
 // ─── APP ─────────────────────────────────────────────────────────────────────
 export default function App() {
-  type BrandMode = 'all' | 'y8' | 'pv';
-
   // ── Auth (Phase 3)
   const [currentUser, setCurrentUser]       = useState<User | null>(null);
   const [authLoading, setAuthLoading]       = useState(true);
@@ -1331,7 +1441,7 @@ export default function App() {
   const [nicknameDraft, setNicknameDraft]   = useState('');
 
   // ── KPI Config
-  const [kpiConfig, setKpiConfig]           = useState<WorkGroups>(WORK_GROUPS);
+  const [kpiConfig, setKpiConfig]           = useState<WorkGroups>(() => migrateWorkGroups(WORK_GROUPS));
   const [monthlyTarget, setMonthlyTarget]   = useState<number>(0);
   const [showKpiEditor, setShowKpiEditor]   = useState(false);
 
@@ -1407,6 +1517,7 @@ export default function App() {
   const [autoHoverExpand, setAutoHoverExpand]   = useState(false);
   const [hoveredGroup, setHoveredGroup]         = useState<string | null>(null);
   const [logBrandMode, setLogBrandMode]         = useState<BrandMode>('all');
+  const [summaryBrandMode, setSummaryBrandMode] = useState<BrandMode>('all');
 
   // ── Offline detection
   useEffect(() => {
@@ -1583,6 +1694,8 @@ export default function App() {
         const initial = getInitialKpiForEmail(currentUser.email);
         if (snap.exists() && snap.data()?.groups) {
           const data = snap.data()!;
+          const migratedGroups = migrateWorkGroups(data.groups as WorkGroups);
+          const needsBrandMigration = JSON.stringify(migratedGroups) !== JSON.stringify(data.groups);
           const mustResetToPolicy =
             !isHostEmail(currentUser.email) && Number(data.policyVersion || 0) < KPI_POLICY_VERSION;
 
@@ -1600,8 +1713,14 @@ export default function App() {
                 updatedAt: Date.now(),
               }, { merge: true });
           } else {
-            setKpiConfig(data.groups as WorkGroups);
+            setKpiConfig(migratedGroups);
             setMonthlyTarget(Math.max(0, Number(data.monthlyTarget || 0)));
+            if (needsBrandMigration) {
+              await setDoc(doc(db, 'kpiConfigs', currentUser.uid), {
+                groups: migratedGroups,
+                updatedAt: Date.now(),
+              }, { merge: true });
+            }
           }
         } else {
           setKpiConfig(initial.groups);
@@ -1762,14 +1881,19 @@ export default function App() {
       const first = activeTab === 'log' ? visibleLogGroupKeys[0] : keys[0];
       if (!first) return;
       setSelectedGroup(first);
-      setSelectedTaskId(kpiConfig[first]?.tasks[0]?.id || '');
+      const nextTasks = activeTab === 'log' ? getVisibleTasksForGroup(kpiConfig[first], logBrandMode) : (kpiConfig[first]?.tasks || []);
+      setSelectedTaskId(nextTasks[0]?.id || '');
       return;
     }
-    const taskIds = (kpiConfig[selectedGroup]?.tasks || []).map(t => t.id);
+    const taskIds = (
+      activeTab === 'log'
+        ? getVisibleTasksForGroup(kpiConfig[selectedGroup], logBrandMode)
+        : (kpiConfig[selectedGroup]?.tasks || [])
+    ).map(t => t.id);
     if (!taskIds.includes(selectedTaskId)) {
       setSelectedTaskId(taskIds[0] || '');
     }
-  }, [activeTab, kpiConfig, selectedGroup, selectedTaskId, visibleLogGroupKeys]);
+  }, [activeTab, kpiConfig, logBrandMode, selectedGroup, selectedTaskId, visibleLogGroupKeys]);
 
   useEffect(() => {
     if (activeTab !== 'log') return;
@@ -1781,14 +1905,14 @@ export default function App() {
     if (!visibleLogGroupKeys.includes(selectedGroup)) {
       const firstVisible = visibleLogGroupKeys[0];
       setSelectedGroup(firstVisible);
-      setSelectedTaskId(kpiConfig[firstVisible]?.tasks[0]?.id || '');
+      setSelectedTaskId(getVisibleTasksForGroup(kpiConfig[firstVisible], logBrandMode)[0]?.id || '');
       return;
     }
-    const visibleTaskIds = (kpiConfig[selectedGroup]?.tasks || []).map((t) => t.id);
+    const visibleTaskIds = getVisibleTasksForGroup(kpiConfig[selectedGroup], logBrandMode).map((t) => t.id);
     if (!visibleTaskIds.includes(selectedTaskId)) {
       setSelectedTaskId(visibleTaskIds[0] || '');
     }
-  }, [activeTab, kpiConfig, selectedGroup, selectedTaskId, visibleLogGroupKeys]);
+  }, [activeTab, kpiConfig, logBrandMode, selectedGroup, selectedTaskId, visibleLogGroupKeys]);
 
   // ── Auth handlers
   const persistGoogleToken = (uid: string, token: string) => {
@@ -2169,12 +2293,14 @@ export default function App() {
   const handleSaveKpiConfig = async (updated: WorkGroups, newTarget?: number) => {
     if (!currentUser) return;
     const target = Math.max(0, Number(newTarget ?? monthlyTarget) || 0);
+    const migratedUpdated = migrateWorkGroups(updated);
     // Immediately sync local state so UI updates without waiting for Firestore listener
-    setKpiConfig(updated);
+    setKpiConfig(migratedUpdated);
     setLogBrandMode('all');
+    setSummaryBrandMode('all');
     if (newTarget !== undefined) setMonthlyTarget(target);
     await setDoc(doc(db, 'kpiConfigs', currentUser.uid), {
-      groups: updated,
+      groups: migratedUpdated,
       monthlyTarget: target,
       uid: currentUser.uid,
       roleId: userProfile?.role || 'custom',
@@ -2242,11 +2368,11 @@ export default function App() {
       // New payload
       date:      entry.date,
       name:      entry.userName || displayName,
-      group:     kpiConfig[entry.groupId]?.name || entry.groupId,
+      group:     entry.groupName || kpiConfig[entry.groupId]?.name || entry.groupId,
       taskId:    entry.taskId,
-      taskName:  task?.name || '',
+      taskName:  entry.taskName || task?.name || '',
       quantity:  entry.quantity,
-      unit:      task?.unit || '',
+      unit:      entry.unit || task?.unit || '',
       credits:   entry.credits,
       notes:     entry.notes,
       canvaLink: entry.canvaLink || '',
@@ -2264,8 +2390,8 @@ export default function App() {
       // Backward-compatible fields (for legacy consumers)
       id:        entry.id,
       user:      entry.userName || displayName,
-      groupName: kpiConfig[entry.groupId]?.name || entry.groupId,
-      channel:   task?.channel || '',
+      groupName: entry.groupName || kpiConfig[entry.groupId]?.name || entry.groupId,
+      channel:   entry.channel || task?.channel || '',
       ownerKey:  sheets.ownerKey,
       masterSheetName:    sheets.masterSheetName,
       dashboardSheetName: sheets.dashboardSheetName,
@@ -2325,12 +2451,13 @@ export default function App() {
     () =>
       orderedGroupKeys.filter((key) => {
         if (logBrandMode === 'all') return true;
-        return kpiConfig[key]?.brands?.includes(logBrandMode) ?? false;
+        return getVisibleTasksForGroup(kpiConfig[key], logBrandMode).length > 0;
       }),
     [kpiConfig, logBrandMode, orderedGroupKeys]
   );
 
   const logBrandModeLabel = logBrandMode === 'all' ? 'All' : logBrandMode.toUpperCase();
+  const summaryBrandModeLabel = summaryBrandMode === 'all' ? 'All' : summaryBrandMode.toUpperCase();
 
   // ── Admin: delete user data from Firestore + notify webhook
   const handleDeleteAdminUser = async (uid: string, nickname: string) => {
@@ -2366,8 +2493,9 @@ export default function App() {
     const fallbackGroupKey = visibleLogGroupKeys[0] || orderedGroupKeys[0];
     const group = kpiConfig[selectedGroup] || (fallbackGroupKey ? kpiConfig[fallbackGroupKey] : undefined);
     if (!group) return undefined;
-    return group.tasks.find((t) => t.id === selectedTaskId) || group.tasks[0];
-  }, [kpiConfig, orderedGroupKeys, selectedGroup, selectedTaskId, visibleLogGroupKeys]);
+    const visibleTasks = getVisibleTasksForGroup(group, logBrandMode);
+    return visibleTasks.find((t) => t.id === selectedTaskId) || visibleTasks[0] || group.tasks[0];
+  }, [kpiConfig, logBrandMode, orderedGroupKeys, selectedGroup, selectedTaskId, visibleLogGroupKeys]);
 
   const displayName =
     userProfile?.nickname?.trim() ||
@@ -2384,8 +2512,8 @@ export default function App() {
   const exportYearOptions = useMemo(() => {
     const years = new Set<number>([new Date().getFullYear()]);
     entries.forEach((entry) => {
-      const year = new Date(entry.date).getFullYear();
-      if (!Number.isNaN(year)) years.add(year);
+      const year = parseDateParts(entry.date)?.year;
+      if (year !== undefined) years.add(year);
     });
     return Array.from(years).sort((a, b) => b - a);
   }, [entries]);
@@ -2396,10 +2524,8 @@ export default function App() {
     const uid = currentUser?.uid;
     const userEntries = entries.filter((e) => e.user === uid);
     const monthEntries = userEntries.filter((e) => {
-      try {
-        const d = new Date(e.date);
-        return d.getMonth() === now.getMonth() && d.getFullYear() === now.getFullYear();
-      } catch { return false; }
+      const parts = parseDateParts(e.date);
+      return parts?.monthIndex === now.getMonth() && parts?.year === now.getFullYear();
     });
     const todayEntries = userEntries.filter((e) => e.date === getTodayStr());
     const monthCredits = monthEntries.reduce((s, e) => s + e.credits, 0);
@@ -2415,10 +2541,8 @@ export default function App() {
     const uid = currentUser?.uid;
     const userEntries = entries.filter((e) => e.user === uid);
     const monthEntries = userEntries.filter((e) => {
-      try {
-        const d = new Date(e.date);
-        return d.getMonth() === summaryMonth && d.getFullYear() === summaryYear;
-      } catch { return false; }
+      const parts = parseDateParts(e.date);
+      return parts?.monthIndex === summaryMonth && parts?.year === summaryYear;
     });
     const totalCredits   = monthEntries.reduce((s, e) => s + e.credits, 0);
     const isTargetSet    = monthlyTarget > 0;
@@ -2428,7 +2552,7 @@ export default function App() {
       .sort((a, b) => a.localeCompare(b))
       .map((key) => ({
         key,
-        name:    kpiConfig[key].name,
+        name:    monthEntries.find((e) => e.groupId === key)?.groupName || kpiConfig[key].name,
         color:   kpiConfig[key].color,
         bg:      kpiConfig[key].bg,
         credits: monthEntries.filter((e) => e.groupId === key).reduce((s, e) => s + e.credits, 0),
@@ -2464,12 +2588,8 @@ export default function App() {
     const now = new Date();
     const profileByUid = new Map<string, UserProfile>(adminProfiles.map((p) => [p.uid, p]));
     const monthEntries = adminEntries.filter((e) => {
-      try {
-        const d = new Date(e.date);
-        return d.getMonth() === now.getMonth() && d.getFullYear() === now.getFullYear();
-      } catch {
-        return false;
-      }
+      const parts = parseDateParts(e.date);
+      return parts?.monthIndex === now.getMonth() && parts?.year === now.getFullYear();
     });
 
     const byUser = monthEntries.reduce<Record<string, { credits: number; count: number }>>((acc, entry) => {
@@ -2507,17 +2627,24 @@ export default function App() {
   // ── CRUD handlers
   const handleAddEntry = async () => {
     if (!currentUser || !currentTask) return;
+    const currentGroup = kpiConfig[selectedGroup];
     const id = crypto.randomUUID ? crypto.randomUUID() : Math.random().toString(36).substr(2, 9);
     const newEntry: WorkEntry = {
       id,
       date:      selectedDate,
       user:      currentUser.uid,
       userName:  displayName,
+      role:      userProfile?.role || 'custom',
       groupId:   selectedGroup,
+      groupName: currentGroup?.name || selectedGroup,
       taskId:    selectedTaskId,
+      taskName:  currentTask.name,
       quantity,
+      unit:      currentTask.unit,
+      creditPerUnit: currentTask.creditPerUnit,
       credits:   quantity * currentTask.creditPerUnit,
       notes,
+      channel:   currentTask.channel,
       createdAt: Date.now(),
       ...(canvaLink.trim() ? { canvaLink: canvaLink.trim() } : {}),
       ...(driveLink.trim() || logAttachments[0]?.link
@@ -2549,7 +2676,15 @@ export default function App() {
     if (!editEntry || !currentUser) return;
     const task = kpiConfig[editEntry.groupId]?.tasks.find((t) => t.id === editEntry.taskId);
     if (!task) return;
-    const updated = { ...editEntry, credits: editEntry.quantity * task.creditPerUnit };
+    const updated = {
+      ...editEntry,
+      groupName: kpiConfig[editEntry.groupId]?.name || editEntry.groupName || editEntry.groupId,
+      taskName: task.name,
+      unit: task.unit,
+      creditPerUnit: task.creditPerUnit,
+      channel: task.channel,
+      credits: editEntry.quantity * task.creditPerUnit,
+    };
     setIsLoading(true);
     try {
       await setDoc(doc(db, 'users', currentUser.uid, 'entries', updated.id), updated);
@@ -2583,12 +2718,8 @@ export default function App() {
     return entries
       .filter((e) => e.user === currentUser?.uid)
       .filter((e) => {
-        try {
-          const date = new Date(e.date);
-          return date.getMonth() === month && date.getFullYear() === year;
-        } catch {
-          return false;
-        }
+        const parts = parseDateParts(e.date);
+        return parts?.monthIndex === month && parts?.year === year;
       })
       .sort((a, b) => a.date.localeCompare(b.date));
   };
@@ -2617,12 +2748,12 @@ export default function App() {
       const group     = kpiConfig[gKey];
       const groupRows = filtered.filter(e => e.groupId === gKey);
       const gTotal    = groupRows.reduce((s, e) => s + e.credits, 0);
-      content += `📁 ${group?.name || gKey}\n`;
+      content += `📁 ${groupRows[0]?.groupName || group?.name || gKey}\n`;
       groupRows.forEach((e, idx) => {
         const task = group?.tasks.find(t => t.id === e.taskId);
         const dd   = e.date.slice(8) + '/' + e.date.slice(5,7);
-        content += `  ${idx+1}. [${dd}] ${task?.name || 'Unknown'}\n`;
-        content += `     ${e.quantity} ${task?.unit || ''} x ${task?.creditPerUnit || 1} Cr = ${e.credits} Cr\n`;
+        content += `  ${idx+1}. [${dd}] ${e.taskName || task?.name || 'Unknown'}\n`;
+        content += `     ${e.quantity} ${e.unit || task?.unit || ''} x ${e.creditPerUnit ?? task?.creditPerUnit ?? 1} Cr = ${e.credits} Cr\n`;
         if (e.notes) content += `     💬 ${e.notes}\n`;
       });
       content += `  รวมกลุ่มนี้: ${gTotal} Credits\n\n`;
@@ -2666,7 +2797,7 @@ export default function App() {
     const rows = filtered.map((e, idx) => {
       const g = kpiConfig[e.groupId];
       const t = g?.tasks.find(x => x.id === e.taskId);
-      return [idx + 1, e.date, g?.name || e.groupId, e.taskId, t?.name || '', e.quantity, t?.unit || '', t?.creditPerUnit || 1, e.credits, e.notes || '', e.canvaLink || '', e.driveLink || ''];
+      return [idx + 1, e.date, e.groupName || g?.name || e.groupId, e.taskId, e.taskName || t?.name || '', e.quantity, e.unit || t?.unit || '', e.creditPerUnit ?? t?.creditPerUnit ?? 1, e.credits, e.notes || '', e.canvaLink || '', e.driveLink || ''];
     });
     const summary = [[], [`รวมทั้งหมด`, totalCredits, `Cr`, `${pct}% ของเป้า ${monthlyTarget} Cr`]];
     const values  = [
@@ -2705,11 +2836,12 @@ export default function App() {
       }
 
       // เขียน/อัปเดตข้อมูลเสมอ (ทั้งสร้างใหม่และเปิดซ้ำ)
-      await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/A1?valueInputOption=RAW`, {
+      const updateRes = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/A1?valueInputOption=RAW`, {
         method: 'PUT',
         headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
         body: JSON.stringify({ values }),
       });
+      if (!updateRes.ok) throw new Error('update_failed');
       showToast(savedId ? `✅ อัปเดต Google Sheet แล้ว (${filtered.length} รายการ)` : '✅ สร้าง Google Sheet ใหม่แล้ว!');
       window.open(`https://docs.google.com/spreadsheets/d/${spreadsheetId}`, '_blank');
     } catch {
@@ -2768,12 +2900,12 @@ export default function App() {
       return [
         idx + 1,
         e.date,
-        `"${group?.name || e.groupId}"`,
+        `"${e.groupName || group?.name || e.groupId}"`,
         e.taskId,
-        `"${task?.name || 'Unknown'}"`,
+        `"${e.taskName || task?.name || 'Unknown'}"`,
         e.quantity,
-        task?.unit || '',
-        task?.creditPerUnit || 1,
+        e.unit || task?.unit || '',
+        e.creditPerUnit ?? task?.creditPerUnit ?? 1,
         e.credits,
         `"${e.notes || ''}"`,
         `"${e.canvaLink || ''}"`,
@@ -2819,7 +2951,7 @@ export default function App() {
       const groupRows = filtered.filter(e => e.groupId === gKey);
       const gTotal    = groupRows.reduce((s, e) => s + e.credits, 0);
 
-      rows.push(`${q(`▸ ${gKey} — ${group?.name || gKey}`)}`);
+      rows.push(`${q(`▸ ${gKey} — ${groupRows[0]?.groupName || group?.name || gKey}`)}`);
       rows.push(['#', 'Date', 'Task ID', 'Task Name', 'Qty', 'Unit', 'Cr/Unit', 'Credits', 'Notes', 'Canva', 'Drive'].map(q).join(','));
 
       groupRows.forEach((e, idx) => {
@@ -2828,10 +2960,10 @@ export default function App() {
           idx + 1,
           q(e.date),
           q(e.taskId),
-          q(task?.name || 'Unknown'),
+          q(e.taskName || task?.name || 'Unknown'),
           e.quantity,
-          q(task?.unit || ''),
-          task?.creditPerUnit || 1,
+          q(e.unit || task?.unit || ''),
+          e.creditPerUnit ?? task?.creditPerUnit ?? 1,
           e.credits,
           q(e.notes || ''),
           q(e.canvaLink || ''),
