@@ -304,8 +304,8 @@ type FileHandleWithPermission = FileSystemFileHandle & {
   requestPermission?: (descriptor?: { mode?: 'read' | 'readwrite' }) => Promise<PermissionState>;
 };
 
-// GAS Webhook URL — pre-configured so users don't need to enter it manually
-const DEFAULT_GAS_WEBHOOK = 'https://script.google.com/macros/s/AKfycbwZyi-i1WHuJaYwvvIZH6fyrbN58t8d4kbj6hzThKXKT390OHJj-yydQJAqGBgbXOJM/exec';
+// Leave empty until a compatible GAS v4 web app is deployed and confirmed.
+const DEFAULT_GAS_WEBHOOK = '';
 
 // GAS v4 — Single-spreadsheet, multi-user, upsert/delete by entry_id, Drive folder sync
 const GAS_TEMPLATE = `// ================================================================
@@ -2645,7 +2645,8 @@ export default function App() {
     if (!sheetsWebhookUrl) throw new Error('webhook_missing');
     const response = await fetch(sheetsWebhookUrl, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      // Use a CORS-safelisted content type so browser requests avoid OPTIONS preflight.
+      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
       body: JSON.stringify(payload),
     });
     let data: SheetsWebhookResponse | null = null;
@@ -3665,11 +3666,11 @@ export default function App() {
                 />
                 <button
                   onClick={() => {
-                    navigator.clipboard.writeText(GAS_TEMPLATE).then(() => showToast('คัดลอก GAS Template v3 แล้ว ✓'));
+                    navigator.clipboard.writeText(GAS_TEMPLATE).then(() => showToast('คัดลอก GAS Template v4 แล้ว ✓'));
                   }}
                   className="w-full py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-[11px] font-bold text-slate-500 flex items-center justify-center gap-1.5 active:bg-orange-50 transition-colors"
                 >
-                  📋 Copy GAS Template v3 (Apps Script)
+                  📋 Copy GAS Template v4 (Apps Script)
                 </button>
               </>
             ) : (
