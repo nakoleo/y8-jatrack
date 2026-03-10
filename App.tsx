@@ -10,7 +10,7 @@ import {
 } from 'lucide-react';
 import {
   collection, collectionGroup, doc, setDoc, deleteDoc,
-  onSnapshot, query, orderBy, getDocs,
+  onSnapshot, query, orderBy, getDocs, getDoc,
 } from 'firebase/firestore';
 import {
   signInWithPopup, signOut, onAuthStateChanged, type User,
@@ -31,6 +31,35 @@ const KPI_POLICY_VERSION = 3;
 const EXPECTED_FIREBASE_PROJECT = 'jartrack-y8pv';
 const EXPECTED_FIREBASE_AUTH_DOMAIN = 'jartrack-y8pv.firebaseapp.com';
 const BRAND_OPTIONS: BrandId[] = ['y8', 'pv'];
+const GIFT_UID = 'OeTpJfXcjqXrielPIiHdZONRWIU2';
+const ALL_ENTRIES_HEADERS = [
+  'timestamp', 'date', 'uid', 'email', 'nickname', 'role',
+  'group', 'taskId', 'taskName', 'qty', 'unit', 'credits',
+  'notes', 'canvaLink', 'driveLink',
+  'attachments_count', 'attachments_links', 'attachments_names',
+  'entry_id',
+];
+const USER_REGISTRY_HEADERS = [
+  'uid', 'email', 'nickname', 'role', 'kpiSheet',
+  'first_seen', 'last_seen', 'entry_count',
+];
+const KPI_SHEET_HEADERS = [
+  'timestamp', 'date', 'group', 'taskId', 'taskName',
+  'qty', 'unit', 'credits', 'notes', 'canvaLink', 'driveLink',
+  'attachments_count', 'attachments_links', 'attachments_names',
+  'entry_id',
+];
+const DEBUG_ENTRY_IDS = new Set(['probe', 'browser_probe', 'chain_probe', 'preserve_probe', 'beacon_probe']);
+const DEBUG_UIDS = new Set(['probe', 'browser_probe', 'chain_probe', 'preserve_probe', 'beacon_probe']);
+const DEBUG_KPI_SHEETS = new Set([
+  'Probe_KPI',
+  'Browser_Probe_KPI',
+  'Chain_Probe_KPI',
+  'Preserve_Probe_KPI',
+  'Beacon_Probe_KPI',
+  'user__KPI',
+]);
+const DEBUG_NICKNAMES = new Set(['Probe', 'Browser_Probe', 'Chain_Probe', 'Preserve_Probe', 'Beacon_Probe', 'user_']);
 type BrandMode = 'all' | BrandId;
 
 const ZERO_STARTER_GROUPS: WorkGroups = {
@@ -1516,6 +1545,8 @@ export default function App() {
   const [isOnline, setIsOnline]             = useState(navigator.onLine);
 
   const [sheetUrl, setSheetUrl]             = useState<string>('');
+  const [giftBackfillBusy, setGiftBackfillBusy] = useState(false);
+  const [giftBackfillStatus, setGiftBackfillStatus] = useState('');
   const [geminiApiKey, setGeminiApiKey]     = useState('');
   const [geminiResult, setGeminiResult]     = useState('');
   const [geminiLoading, setGeminiLoading]   = useState(false);
@@ -3018,6 +3049,355 @@ export default function App() {
       showToast('❌ ลบไม่สำเร็จ');
     } finally {
       setIsLoading(false);
+    }
+  };
+
+  const parseSpreadsheetIdFromUrl = (url: string) => {
+    const trimmed = url.trim();
+    if (!trimmed) return '';
+    const match = trimmed.match(/\/spreadsheets\/d\/([a-zA-Z0-9-_]+)/);
+    return match?.[1] || trimmed;
+  };
+
+  const getSheetCell = (row: Array<string | number>, index: number) => String(row[index] ?? '').trim();
+
+  const isDebugAllEntriesRow = (row: Array<string | number>) => {
+    const uid = getSheetCell(row, 2);
+    const nickname = getSheetCell(row, 4);
+    const entryId = getSheetCell(row, 18);
+    return (
+      DEBUG_UIDS.has(uid) ||
+      DEBUG_ENTRY_IDS.has(entryId) ||
+      DEBUG_NICKNAMES.has(nickname) ||
+      (!uid && nickname === 'user_')
+    );
+  };
+
+  const isDebugUserRegistryRow = (row: Array<string | number>) => {
+    const uid = getSheetCell(row, 0);
+    const nickname = getSheetCell(row, 2);
+    const kpiSheet = getSheetCell(row, 4);
+    return (
+      DEBUG_UIDS.has(uid) ||
+      DEBUG_NICKNAMES.has(nickname) ||
+      DEBUG_KPI_SHEETS.has(kpiSheet) ||
+      (!uid && nickname === 'user_')
+    );
+  };
+
+  const compareRowsByTimestamp = (a: Array<string | number>, b: Array<string | number>, nicknameIndex: number, entryIdIndex: number) => {
+    const dateCompare = getSheetCell(a, 1).localeCompare(getSheetCell(b, 1));
+    if (dateCompare !== 0) return dateCompare;
+    const timestampCompare = getSheetCell(a, 0).localeCompare(getSheetCell(b, 0));
+    if (timestampCompare !== 0) return timestampCompare;
+    const nicknameCompare = getSheetCell(a, nicknameIndex).localeCompare(getSheetCell(b, nicknameIndex));
+    if (nicknameCompare !== 0) return nicknameCompare;
+    return getSheetCell(a, entryIdIndex).localeCompare(getSheetCell(b, entryIdIndex));
+  };
+
+  const compareRegistryRows = (a: Array<string | number>, b: Array<string | number>) => {
+    const nicknameCompare = getSheetCell(a, 2).localeCompare(getSheetCell(b, 2));
+    if (nicknameCompare !== 0) return nicknameCompare;
+    return getSheetCell(a, 0).localeCompare(getSheetCell(b, 0));
+  };
+
+  const sheetsApiRequest = async <T,>(token: string, url: string, init?: RequestInit): Promise<T> => {
+    const response = await fetch(url, {
+      ...init,
+      headers: {
+        Authorization: `Bearer ${token}`,
+        ...(init?.headers || {}),
+      },
+    });
+    if (!response.ok) {
+      const text = await response.text().catch(() => '');
+      throw new Error(text || `sheets_http_${response.status}`);
+    }
+    if (response.status === 204) return {} as T;
+    return await response.json() as T;
+  };
+
+  const getSpreadsheetMeta = async (token: string, spreadsheetId: string) => {
+    return await sheetsApiRequest<{
+      sheets?: Array<{ properties?: { sheetId?: number; title?: string } }>;
+    }>(
+      token,
+      `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}?fields=sheets.properties(sheetId,title)`
+    );
+  };
+
+  const getSheetValues = async (token: string, spreadsheetId: string, range: string) => {
+    const data = await sheetsApiRequest<{ values?: Array<Array<string | number>> }>(
+      token,
+      `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/${encodeURIComponent(range)}`
+    );
+    return data.values || [];
+  };
+
+  const clearSheetValues = async (token: string, spreadsheetId: string, range: string) => {
+    await sheetsApiRequest(
+      token,
+      `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/${encodeURIComponent(range)}:clear`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: '{}',
+      }
+    );
+  };
+
+  const updateSheetValues = async (
+    token: string,
+    spreadsheetId: string,
+    range: string,
+    values: Array<Array<string | number>>
+  ) => {
+    await sheetsApiRequest(
+      token,
+      `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/${encodeURIComponent(range)}?valueInputOption=RAW`,
+      {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ range, majorDimension: 'ROWS', values }),
+      }
+    );
+  };
+
+  const batchUpdateSpreadsheet = async (
+    token: string,
+    spreadsheetId: string,
+    requests: Record<string, unknown>[]
+  ) => {
+    if (!requests.length) return { replies: [] as Array<Record<string, unknown>> };
+    return await sheetsApiRequest<{ replies?: Array<Record<string, unknown>> }>(
+      token,
+      `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}:batchUpdate`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ requests }),
+      }
+    );
+  };
+
+  const ensureSheetExists = async (token: string, spreadsheetId: string, title: string) => {
+    const meta = await getSpreadsheetMeta(token, spreadsheetId);
+    const existing = meta.sheets?.find((sheet) => sheet.properties?.title === title)?.properties?.sheetId;
+    if (existing) return existing;
+    const result = await batchUpdateSpreadsheet(token, spreadsheetId, [
+      { addSheet: { properties: { title } } },
+    ]);
+    const createdId = result.replies?.[0]?.addSheet?.properties?.sheetId;
+    if (typeof createdId !== 'number') throw new Error(`create_sheet_failed:${title}`);
+    return createdId;
+  };
+
+  const handleBackfillGiftToSheet = async () => {
+    if (!isSuperAdmin) return;
+    const spreadsheetId = parseSpreadsheetIdFromUrl(sheetUrl);
+    if (!spreadsheetId) {
+      showToast('ใส่ Google Sheet URL ก่อน');
+      return;
+    }
+
+    const token = await ensureDriveAccessToken();
+    if (!token) return;
+
+    setGiftBackfillBusy(true);
+    setGiftBackfillStatus('กำลังโหลดข้อมูล Gift...');
+
+    try {
+      const [giftProfileSnap, giftKpiSnap, giftEntriesSnap] = await Promise.all([
+        getDoc(doc(db, 'users', GIFT_UID)),
+        getDoc(doc(db, 'kpiConfigs', GIFT_UID)),
+        getDocs(query(collection(db, 'users', GIFT_UID, 'entries'), orderBy('createdAt', 'asc'))),
+      ]);
+
+      const storedProfile = giftProfileSnap.exists() ? (giftProfileSnap.data() as UserProfile) : null;
+      const giftProfile: UserProfile = {
+        uid: GIFT_UID,
+        displayName: storedProfile?.displayName || 'Young Age',
+        nickname: storedProfile?.nickname || 'Gift',
+        email: normalizeEmail(storedProfile?.email || HOST_EMAIL),
+        photoURL: storedProfile?.photoURL || '',
+        role: resolveRoleByEmail(storedProfile?.email || HOST_EMAIL),
+        isAdmin: false,
+        createdAt: storedProfile?.createdAt || Date.now(),
+        updatedAt: storedProfile?.updatedAt || Date.now(),
+        customTitle: storedProfile?.customTitle,
+        settings: storedProfile?.settings,
+      };
+
+      const giftGroups = giftKpiSnap.exists() && giftKpiSnap.data()?.groups
+        ? migrateWorkGroups(giftKpiSnap.data()?.groups as WorkGroups)
+        : getInitialKpiForEmail(giftProfile.email).groups;
+      const giftEntries = giftEntriesSnap.docs.map((entryDoc) => ({ ...entryDoc.data() } as WorkEntry));
+      const giftNickname = (giftProfile.nickname || 'Gift').trim() || 'Gift';
+      const giftKpiSheetName = `${sheetSafe(giftNickname, 'Gift')}_KPI`;
+
+      setGiftBackfillStatus(`พบ ${giftEntries.length} รายการของ Gift · กำลังเตรียมข้อมูล...`);
+
+      const buildGiftRows = () => {
+        let unmatched = 0;
+        let firstSeen = Number.MAX_SAFE_INTEGER;
+        let lastSeen = 0;
+
+        const allRows = giftEntries.map((entry) => {
+          const group = giftGroups[entry.groupId];
+          const task = group?.tasks.find((item) => item.id === entry.taskId);
+          const groupName = entry.groupName || group?.label || group?.name || entry.groupId;
+          const taskName = entry.taskName || task?.name || entry.taskId;
+          const unit = entry.unit || task?.unit || '';
+          if (!group || !task) unmatched += 1;
+
+          const createdAt = Number(entry.createdAt || Date.now());
+          firstSeen = Math.min(firstSeen, createdAt);
+          lastSeen = Math.max(lastSeen, createdAt);
+          const timestamp = Number.isFinite(createdAt) ? new Date(createdAt).toISOString() : new Date().toISOString();
+          const attachments = entry.attachments || [];
+          const attachmentsCount = attachments.length;
+          const attachmentsLinks = attachments.map((item) => item.link).join(' | ') || (entry.driveLink || '');
+          const attachmentsNames = attachments.map((item) => item.normalizedName).join(' | ');
+          const driveLinkValue = entry.driveLink || attachments[0]?.link || '';
+
+          const masterRow: Array<string | number> = [
+            timestamp,
+            entry.date || '',
+            GIFT_UID,
+            giftProfile.email,
+            giftNickname,
+            String(giftProfile.role || 'graphic_designer'),
+            groupName,
+            entry.taskId || '',
+            taskName,
+            Number(entry.quantity || 0),
+            unit,
+            Number(entry.credits || 0),
+            entry.notes || '',
+            entry.canvaLink || '',
+            driveLinkValue,
+            attachmentsCount,
+            attachmentsLinks,
+            attachmentsNames,
+            entry.id,
+          ];
+
+          const kpiRow: Array<string | number> = [
+            timestamp,
+            entry.date || '',
+            groupName,
+            entry.taskId || '',
+            taskName,
+            Number(entry.quantity || 0),
+            unit,
+            Number(entry.credits || 0),
+            entry.notes || '',
+            entry.canvaLink || '',
+            driveLinkValue,
+            attachmentsCount,
+            attachmentsLinks,
+            attachmentsNames,
+            entry.id,
+          ];
+
+          return { masterRow, kpiRow };
+        });
+
+        const firstSeenIso = Number.isFinite(firstSeen) ? new Date(firstSeen).toISOString() : new Date().toISOString();
+        const lastSeenIso = lastSeen > 0 ? new Date(lastSeen).toISOString() : firstSeenIso;
+        return { allRows, unmatched, firstSeenIso, lastSeenIso };
+      };
+
+      const { allRows: giftRows, unmatched, firstSeenIso, lastSeenIso } = buildGiftRows();
+      const giftMasterRows = giftRows.map((row) => row.masterRow);
+      const giftKpiRows = giftRows.map((row) => row.kpiRow);
+
+      setGiftBackfillStatus('กำลังเช็กโครงสร้าง Google Sheet...');
+
+      const existingMeta = await getSpreadsheetMeta(token, spreadsheetId);
+      const debugTabs = (existingMeta.sheets || [])
+        .filter((sheet) => DEBUG_KPI_SHEETS.has(sheet.properties?.title || ''))
+        .map((sheet) => sheet.properties?.sheetId)
+        .filter((sheetId): sheetId is number => typeof sheetId === 'number');
+
+      if (debugTabs.length) {
+        await batchUpdateSpreadsheet(
+          token,
+          spreadsheetId,
+          debugTabs.map((sheetId) => ({ deleteSheet: { sheetId } }))
+        );
+      }
+
+      await ensureSheetExists(token, spreadsheetId, giftKpiSheetName);
+
+      const [allEntriesValues, registryValues] = await Promise.all([
+        getSheetValues(token, spreadsheetId, 'ALL_ENTRIES!A:S'),
+        getSheetValues(token, spreadsheetId, '_USER_REGISTRY!A:H'),
+      ]);
+
+      const existingAllRows = allEntriesValues.slice(1);
+      const existingRegistryRows = registryValues.slice(1);
+
+      const retainedAllRows = existingAllRows.filter((row) => !isDebugAllEntriesRow(row));
+      const retainedRegistryRows = existingRegistryRows.filter((row) => !isDebugUserRegistryRow(row));
+
+      const allEntriesMap = new Map<string, Array<string | number>>();
+      for (const row of retainedAllRows) {
+        const entryId = getSheetCell(row, 18);
+        if (!entryId) continue;
+        allEntriesMap.set(entryId, row);
+      }
+      for (const row of giftMasterRows) {
+        const entryId = getSheetCell(row, 18);
+        allEntriesMap.set(entryId, row);
+      }
+
+      const registryMap = new Map<string, Array<string | number>>();
+      for (const row of retainedRegistryRows) {
+        const uid = getSheetCell(row, 0);
+        if (!uid) continue;
+        registryMap.set(uid, row);
+      }
+      registryMap.set(GIFT_UID, [
+        GIFT_UID,
+        giftProfile.email,
+        giftNickname,
+        String(giftProfile.role || 'graphic_designer'),
+        giftKpiSheetName,
+        firstSeenIso,
+        lastSeenIso,
+        giftEntries.length,
+      ]);
+
+      const nextAllEntries = Array.from(allEntriesMap.values()).sort((a, b) => compareRowsByTimestamp(a, b, 4, 18));
+      const nextRegistry = Array.from(registryMap.values()).sort(compareRegistryRows);
+      const nextGiftKpi = giftKpiRows.sort((a, b) => compareRowsByTimestamp(a, b, 2, 14));
+
+      setGiftBackfillStatus('กำลังเขียนข้อมูลลง Google Sheet...');
+
+      await Promise.all([
+        clearSheetValues(token, spreadsheetId, 'ALL_ENTRIES!A:S'),
+        clearSheetValues(token, spreadsheetId, '_USER_REGISTRY!A:H'),
+        clearSheetValues(token, spreadsheetId, `${giftKpiSheetName}!A:O`),
+      ]);
+
+      await Promise.all([
+        updateSheetValues(token, spreadsheetId, 'ALL_ENTRIES!A1', [ALL_ENTRIES_HEADERS, ...nextAllEntries]),
+        updateSheetValues(token, spreadsheetId, '_USER_REGISTRY!A1', [USER_REGISTRY_HEADERS, ...nextRegistry]),
+        updateSheetValues(token, spreadsheetId, `${giftKpiSheetName}!A1`, [KPI_SHEET_HEADERS, ...nextGiftKpi]),
+      ]);
+
+      const cleanedAllRows = existingAllRows.length - retainedAllRows.length;
+      const cleanedRegistryRows = existingRegistryRows.length - retainedRegistryRows.length;
+      const statusMessage = `Gift ${giftEntries.length} รายการ · unmatched ${unmatched} · ลบ debug rows ${cleanedAllRows + cleanedRegistryRows} · ลบ debug tabs ${debugTabs.length}`;
+      setGiftBackfillStatus(statusMessage);
+      showToast(`Backfill Gift สำเร็จ ✓ (${giftEntries.length} รายการ)`);
+    } catch (error) {
+      console.error('Gift backfill failed:', error);
+      setGiftBackfillStatus('Backfill ไม่สำเร็จ');
+      showToast('❌ Backfill Gift ไม่สำเร็จ');
+    } finally {
+      setGiftBackfillBusy(false);
     }
   };
 
