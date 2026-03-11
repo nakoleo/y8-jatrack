@@ -25,6 +25,11 @@ service cloud.firestore {
         allow read: if isOwner(userId) || isSuperAdmin();
         allow create, update, delete: if isOwner(userId) || isSuperAdmin();
       }
+
+      match /dailyReports/{reportId} {
+        allow read: if isOwner(userId) || isSuperAdmin();
+        allow create, update, delete: if isOwner(userId) || isSuperAdmin();
+      }
     }
 
     match /kpiConfigs/{userId} {

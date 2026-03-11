@@ -6,22 +6,19 @@ import {
   ChevronDown, FileText, Sparkles, Download, RefreshCw,
   LogOut, ChevronLeft, ChevronRight, TrendingUp, Wifi, WifiOff,
   Save, Sliders, UserCircle, Upload, ExternalLink, AlertTriangle,
-  FolderOpen,
+  FolderOpen, Copy, ClipboardCheck, Sun, Moon,
 } from 'lucide-react';
 import {
   collection, collectionGroup, doc, setDoc, deleteDoc,
-  onSnapshot, query, orderBy, getDocs, getDoc,
+  onSnapshot, query, orderBy, getDocs,
 } from 'firebase/firestore';
 import {
   signInWithPopup, signOut, onAuthStateChanged, type User,
   reauthenticateWithPopup, GoogleAuthProvider,
-  signInWithEmailAndPassword, fetchSignInMethodsForEmail,
-  linkWithCredential, EmailAuthProvider, updatePassword,
-  reauthenticateWithCredential,
 } from 'firebase/auth';
 import { db, auth, googleProvider, createDriveProvider, firebaseApp } from './firebase';
 import { WORK_GROUPS } from './constants';
-import { WorkEntry, WorkGroup, WorkGroups, TabType, UserProfile, RoleId, DriveAttachment, LocalFileRef, BrandId, Task } from './types';
+import { WorkEntry, WorkGroup, WorkGroups, TabType, UserProfile, RoleId, DriveAttachment, LocalFileRef, DailyReport, DailyReportType } from './types';
 import { ROLE_DEFAULTS, ROLE_EMOJI } from './roleDefaults';
 
 // ─── HELPERS ─────────────────────────────────────────────────────────────────
@@ -30,37 +27,6 @@ const SUPER_ADMIN_EMAIL = 'info.nakoleo@gmail.com';
 const KPI_POLICY_VERSION = 3;
 const EXPECTED_FIREBASE_PROJECT = 'jartrack-y8pv';
 const EXPECTED_FIREBASE_AUTH_DOMAIN = 'jartrack-y8pv.firebaseapp.com';
-const BRAND_OPTIONS: BrandId[] = ['y8', 'pv'];
-const GIFT_UID = 'OeTpJfXcjqXrielPIiHdZONRWIU2';
-const ALL_ENTRIES_HEADERS = [
-  'timestamp', 'date', 'uid', 'email', 'nickname', 'role',
-  'group', 'taskId', 'taskName', 'qty', 'unit', 'credits',
-  'notes', 'canvaLink', 'driveLink',
-  'attachments_count', 'attachments_links', 'attachments_names',
-  'entry_id',
-];
-const USER_REGISTRY_HEADERS = [
-  'uid', 'email', 'nickname', 'role', 'kpiSheet',
-  'first_seen', 'last_seen', 'entry_count',
-];
-const KPI_SHEET_HEADERS = [
-  'timestamp', 'date', 'group', 'taskId', 'taskName',
-  'qty', 'unit', 'credits', 'notes', 'canvaLink', 'driveLink',
-  'attachments_count', 'attachments_links', 'attachments_names',
-  'entry_id',
-];
-const DEBUG_ENTRY_IDS = new Set(['probe', 'browser_probe', 'chain_probe', 'preserve_probe', 'beacon_probe']);
-const DEBUG_UIDS = new Set(['probe', 'browser_probe', 'chain_probe', 'preserve_probe', 'beacon_probe']);
-const DEBUG_KPI_SHEETS = new Set([
-  'Probe_KPI',
-  'Browser_Probe_KPI',
-  'Chain_Probe_KPI',
-  'Preserve_Probe_KPI',
-  'Beacon_Probe_KPI',
-  'user__KPI',
-]);
-const DEBUG_NICKNAMES = new Set(['Probe', 'Browser_Probe', 'Chain_Probe', 'Preserve_Probe', 'Beacon_Probe', 'user_']);
-type BrandMode = 'all' | BrandId;
 
 const ZERO_STARTER_GROUPS: WorkGroups = {
   A: {
@@ -83,81 +49,12 @@ const resolveRoleByEmail = (email?: string | null): RoleId =>
 
 const cloneGroups = (groups: WorkGroups): WorkGroups => JSON.parse(JSON.stringify(groups));
 
-const normalizeBrands = (brands?: BrandId[] | null): BrandId[] =>
-  BRAND_OPTIONS.filter((brand) => (brands || []).includes(brand));
-
-const getBrandLabel = (brands?: BrandId[] | null) => {
-  const normalized = normalizeBrands(brands);
-  const hasY8 = normalized.includes('y8');
-  const hasPv = normalized.includes('pv');
-  if (hasY8 && hasPv) return 'Y8-PV';
-  if (hasY8) return 'Y8';
-  if (hasPv) return 'PV';
-  return null;
-};
-
-const getBrandChipStyle = (brands?: BrandId[] | null) => {
-  const normalized = normalizeBrands(brands);
-  const hasY8 = normalized.includes('y8');
-  const hasPv = normalized.includes('pv');
-  return {
-    background: hasY8 && hasPv ? 'linear-gradient(90deg,#FEF3E2,#FDE8F2)' : hasY8 ? '#FEF3E2' : '#FDE8F2',
-    color: hasY8 && hasPv ? '#9D5C1A' : hasY8 ? '#F4823C' : '#E87AA5',
-  };
-};
-
-const getTaskBrands = (task?: Partial<Task> | null, group?: Partial<WorkGroup> | null): BrandId[] => {
-  if (task && Array.isArray(task.brands)) {
-    return normalizeBrands(task.brands as BrandId[]);
-  }
-  return normalizeBrands(group?.brands as BrandId[] | undefined);
-};
-
-const getEntryBrands = (entry: Partial<WorkEntry>, group?: Partial<WorkGroup> | null, task?: Partial<Task> | null) =>
-  Array.isArray(entry.brands) ? normalizeBrands(entry.brands) : getTaskBrands(task, group);
-
-const matchesBrandMode = (brands: BrandId[], mode: BrandMode) =>
-  mode === 'all' || brands.includes(mode);
-
-const migrateWorkGroups = (groups: WorkGroups): WorkGroups => {
-  const next = cloneGroups(groups);
-  Object.values(next).forEach((group) => {
-    group.tasks = group.tasks.map((task) => ({
-      ...task,
-      brands: getTaskBrands(task, group),
-    }));
-    group.brands = normalizeBrands(group.tasks.flatMap((task) => task.brands || []));
-  });
-  return next;
-};
-
-const getVisibleTasksForGroup = (group: WorkGroup | undefined, mode: BrandMode) => {
-  if (!group) return [] as Task[];
-  return group.tasks.filter((task) => matchesBrandMode(getTaskBrands(task, group), mode));
-};
-
 const getTodayStr = () => {
   const now = new Date();
   const y = now.getFullYear();
   const m = String(now.getMonth() + 1).padStart(2, '0');
   const d = String(now.getDate()).padStart(2, '0');
   return `${y}-${m}-${d}`;
-};
-
-const parseDateParts = (dateStr: string) => {
-  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(dateStr);
-  if (!match) return null;
-  const year = Number(match[1]);
-  const monthIndex = Number(match[2]) - 1;
-  const day = Number(match[3]);
-  if (Number.isNaN(year) || Number.isNaN(monthIndex) || Number.isNaN(day)) return null;
-  return { year, monthIndex, day };
-};
-
-const parseLocalDate = (dateStr: string) => {
-  const parts = parseDateParts(dateStr);
-  if (!parts) return null;
-  return new Date(parts.year, parts.monthIndex, parts.day);
 };
 
 const dateToLocalStr = (date: Date) => {
@@ -190,26 +87,18 @@ const buildSheetNames = (nickname: string, uid?: string) => {
   };
 };
 
-const DEFAULT_USER_SETTINGS: StoredUserSettings = {
-  autoHoverExpand: false,
-  calY8Url: '',
-  calPvUrl: '',
-  driveFolderId: '',
-  sheetUrl: '',
-};
-
 const getInitialKpiForEmail = (email?: string | null) => {
   if (isHostEmail(email)) {
     const graphic = ROLE_DEFAULTS.graphic_designer;
     return {
-      groups: migrateWorkGroups(graphic.groups),
+      groups: cloneGroups(graphic.groups),
       monthlyTarget: graphic.meta.monthlyTarget,
       roleId: 'graphic_designer',
       label: graphic.meta.label,
     };
   }
   return {
-    groups: migrateWorkGroups(ZERO_STARTER_GROUPS),
+    groups: cloneGroups(ZERO_STARTER_GROUPS),
     monthlyTarget: 0,
     roleId: resolveRoleByEmail(email),
     label: 'Custom',
@@ -221,8 +110,8 @@ const scopedKey = (uid: string, key: string) => `jartrack_${uid}_${key}`;
 const formatThaiDate = (dateStr: string, full = false) => {
   if (!dateStr) return '';
   try {
-    const date = parseLocalDate(dateStr);
-    if (!date || isNaN(date.getTime())) return dateStr;
+    const date = new Date(dateStr + 'T00:00:00');
+    if (isNaN(date.getTime())) return dateStr;
     return date.toLocaleDateString('th-TH', {
       day: 'numeric',
       month: full ? 'long' : 'short',
@@ -283,6 +172,99 @@ const extractGoogleApiReason = (raw: string) => {
   }
 };
 
+const DEFAULT_REPORT_EMOJIS = {
+  focus: '🚩',
+  routine: '📌',
+  results: '📄',
+  nextMove: '🔜',
+  issues: '⚠️',
+} as const;
+
+const getCurrentTimeHM = () =>
+  new Date().toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
+
+const sanitizeList = (items: string[]) => items.map((item) => item.trim()).filter(Boolean);
+
+const buildDailyLineItems = (items: string[], prefix: string) =>
+  sanitizeList(items)
+    .map((item, index) => (prefix === '✔️' ? `${prefix} ${item}` : `• ${prefix}${index + 1}] ${item}`))
+    .join('\n\n');
+
+const getReportClosing = (gender: 'male' | 'female') => (gender === 'female' ? 'ขอบคุณค่ะ' : 'ขอบคุณครับ');
+
+const buildMorningReportText = (report: {
+  nickname: string;
+  date: string;
+  gender: 'male' | 'female';
+  checkInTime: string;
+  focusItems: string[];
+  focusEmoji: string;
+}) => {
+  const focusText = buildDailyLineItems(report.focusItems, 'F') || '-';
+  const timeStr = report.checkInTime ? `${report.checkInTime} น.` : '-';
+  return `MORNING REPORT: ${report.nickname}
+Date: ${report.date}
+Check-in Time: ${timeStr}
+
+-----------------------------------
+${report.focusEmoji} FOCUS (งานที่โฟกัสหรือเร่งด่วนวันนี้)
+
+${focusText}
+
+-----------------------------------
+🙏 ${getReportClosing(report.gender)}`;
+};
+
+const buildEveningReportText = (report: {
+  nickname: string;
+  date: string;
+  gender: 'male' | 'female';
+  routineItems: string[];
+  resultItems: string[];
+  nextMoveItems: string[];
+  issues: string;
+  issueStatus: 'resolved' | 'unresolved';
+  issueDetail: string;
+  issueNextStep: string;
+  routineEmoji: string;
+  resultsEmoji: string;
+  nextMoveEmoji: string;
+  issuesEmoji: string;
+}) => {
+  const routineText = buildDailyLineItems(report.routineItems, '✔️') || '✔️ -';
+  const resultsText = buildDailyLineItems(report.resultItems, 'R') || '• R1] -';
+  const nextMoveText = buildDailyLineItems(report.nextMoveItems, 'N') || '• N1] -';
+  let issueSection = `${report.issuesEmoji}ISSUES (ปัญหาที่พบในวันนี้): ${report.issues.trim() || 'ไม่มี'}`;
+  if (report.issues.trim() && report.issues.trim() !== 'ไม่มี') {
+    issueSection += `\nสถานะ: ${report.issueStatus === 'resolved' ? '✅ แก้ไขได้แล้ว' : '❌ ยังแก้ไขไม่ได้'}`;
+    if (report.issueDetail.trim()) issueSection += `\nรายละเอียด: ${report.issueDetail.trim()}`;
+    if (report.issueNextStep.trim()) issueSection += `\nแนวทางดำเนินการต่อ: ${report.issueNextStep.trim()}`;
+  }
+  return `EVENING REPORT: ${report.nickname}
+Date: ${report.date}
+
+-----------------------------------
+${report.routineEmoji} ROUTINE
+
+${routineText}
+
+-----------------------------------
+${report.resultsEmoji}RESULTS (ผลลัพธ์ของงานวันนี้):
+
+${resultsText}
+
+-----------------------------------
+${report.nextMoveEmoji}NEXT MOVE (พรุ่งนี้จะทำอะไรต่อ):
+
+${nextMoveText}
+
+-----------------------------------
+${issueSection}
+
+-----------------------------------
+🙏 ${getReportClosing(report.gender)}`;
+};
+
 /**
  * สร้างชื่อไฟล์มาตรฐาน: [TASKID]_[DDMMYYYY]_[NICKNAME]_[NN].[ext]
  * เช่น A01_08032026_tontawan_01.jpg
@@ -308,41 +290,17 @@ interface PendingUploadFile {
   mode: 'log' | 'edit';
 }
 
-interface StoredUserSettings {
-  autoHoverExpand: boolean;
-  calY8Url: string;
-  calPvUrl: string;
-  driveFolderId: string;
-  sheetUrl: string;
-}
+// GAS Webhook URL — pre-configured so users don't need to enter it manually
+const DEFAULT_GAS_WEBHOOK = 'https://script.google.com/macros/s/AKfycbwDJGgNGMDD16WAlIGubufbxecHIOft4Z4g_HsZ_epughpXNgwHqNJM3fWExOJ3aqVX/exec';
 
-type WebhookAction = 'upsert_entry' | 'delete_entry' | 'delete_user' | 'sync_drive_folders';
-
-interface SheetsWebhookPayload extends Record<string, unknown> {
-  action: WebhookAction;
-}
-
-interface SheetsWebhookResponse {
-  ok: boolean;
-  error?: string;
-  version?: string;
-  created?: string[];
-}
-
-type FileHandleWithPermission = FileSystemFileHandle & {
-  requestPermission?: (descriptor?: { mode?: 'read' | 'readwrite' }) => Promise<PermissionState>;
-};
-
-// Leave empty until a compatible GAS v4 web app is deployed and confirmed.
-const DEFAULT_GAS_WEBHOOK = '';
-
-// GAS v4 — Single-spreadsheet, multi-user, upsert/delete by entry_id, Drive folder sync
+// GAS v3 — Single-spreadsheet, multi-user, auto-creates sheets, supports attachments[] + Drive folders + delete_user
 const GAS_TEMPLATE = `// ================================================================
-// JATRACK — Google Apps Script v4
-// Single Spreadsheet | Multi-User | Upsert/Delete by entry_id
+// JATRACK — Google Apps Script v3
+// Single Spreadsheet | Multi-User | Auto-Setup | Supports Attachments
 // Drive Folder Sync | User Delete Logging
+// Admin-only backend. Users never configure this.
 // ================================================================
-var VERSION = '4.0';
+var VERSION = '3.0';
 var S_CONFIG  = '_CONFIG';
 var S_USERS   = '_USER_REGISTRY';
 var S_ENTRIES = 'ALL_ENTRIES';
@@ -365,12 +323,6 @@ var KPI_HEADERS = [
   'entry_id'
 ];
 
-function jsonOut(obj) {
-  return ContentService
-    .createTextOutput(JSON.stringify(obj))
-    .setMimeType(ContentService.MimeType.JSON);
-}
-
 function cleanName(v, fallback) {
   var s = String(v || '').replace(/[\\\\/?*[\\]:]/g, '').trim().replace(/\\s+/g, '_').slice(0, 60);
   return s || (fallback || 'user');
@@ -386,6 +338,7 @@ function styleHeader(sh, cols, bg, fg) {
   sh.setFrozenRows(1);
 }
 
+// ── Ensure system sheets exist ──────────────────────────────
 function ensureConfig(ss) {
   var sh = getOrCreate(ss, S_CONFIG);
   if (sh.getLastRow() === 0) {
@@ -412,10 +365,13 @@ function ensureAllEntries(ss) {
   if (sh.getLastRow() === 0) {
     sh.appendRow(ENTRY_HEADERS);
     styleHeader(sh, ENTRY_HEADERS.length, '#2C2A28');
+    sh.setColumnWidth(1, 160); sh.setColumnWidth(3, 140);
+    sh.setColumnWidth(9, 150); sh.setColumnWidth(17, 220);
   }
   return sh;
 }
 
+// ── Per-user KPI sheet ──────────────────────────────────────
 function ensureKpiSheet(ss, sheetName, nickname) {
   var sh = ss.getSheetByName(sheetName);
   if (sh) return sh;
@@ -426,6 +382,22 @@ function ensureKpiSheet(ss, sheetName, nickname) {
   return sh;
 }
 
+// ── Upsert user registry ────────────────────────────────────
+function upsertUser(sh, uid, email, nickname, role, kpiSheet) {
+  var data = sh.getDataRange().getValues();
+  for (var i = 1; i < data.length; i++) {
+    if (String(data[i][0]) === String(uid)) {
+      sh.getRange(i + 1, 3).setValue(nickname);
+      sh.getRange(i + 1, 7).setValue(new Date().toISOString());
+      sh.getRange(i + 1, 8).setValue(Number(data[i][7] || 0) + 1);
+      return;
+    }
+  }
+  sh.appendRow([uid, email, nickname, role, kpiSheet,
+    new Date().toISOString(), new Date().toISOString(), 1]);
+}
+
+// ── Parse attachments from payload ─────────────────────────
 function parseAtt(d) {
   var atts = d.attachments;
   if (!atts || !Array.isArray(atts) || atts.length === 0) {
@@ -434,71 +406,13 @@ function parseAtt(d) {
   return {
     count: atts.length,
     links: atts.map(function(a) { return a.link || ''; }).filter(Boolean).join(' | '),
-    names: atts.map(function(a) { return a.normalizedName || a.originalName || ''; }).filter(Boolean).join(' | ')
+    names: atts.map(function(a) {
+      return a.normalizedName || a.originalName || '';
+    }).filter(Boolean).join(' | ')
   };
 }
 
-function findRowByEntryId(sh, entryId) {
-  if (!entryId || sh.getLastRow() < 2) return 0;
-  var data = sh.getRange(2, 1, sh.getLastRow() - 1, sh.getLastColumn()).getValues();
-  for (var i = 0; i < data.length; i++) {
-    if (String(data[i][data[i].length - 1]) === String(entryId)) return i + 2;
-  }
-  return 0;
-}
-
-function upsertRow(sh, values, entryId) {
-  var row = findRowByEntryId(sh, entryId);
-  if (row > 0) {
-    sh.getRange(row, 1, 1, values.length).setValues([values]);
-    return 'updated';
-  }
-  sh.appendRow(values);
-  return 'inserted';
-}
-
-function deleteRowByEntryId(sh, entryId) {
-  var row = findRowByEntryId(sh, entryId);
-  if (row > 0) {
-    sh.deleteRow(row);
-    return true;
-  }
-  return false;
-}
-
-function upsertUser(sh, uid, email, nickname, role, kpiSheet) {
-  var data = sh.getDataRange().getValues();
-  for (var i = 1; i < data.length; i++) {
-    if (String(data[i][0]) === String(uid)) {
-      sh.getRange(i + 1, 2, 1, 4).setValues([[email, nickname, role, kpiSheet]]);
-      sh.getRange(i + 1, 7).setValue(new Date().toISOString());
-      sh.getRange(i + 1, 8).setValue(Number(data[i][7] || 0) + 1);
-      return;
-    }
-  }
-  sh.appendRow([uid, email, nickname, role, kpiSheet, new Date().toISOString(), new Date().toISOString(), 1]);
-}
-
-function getMasterRow(d, uid, email, nickname, role, att) {
-  return [
-    d.timestamp || new Date().toISOString(), d.date || '', uid, email,
-    nickname, role, d.group || '', d.taskId || '', d.taskName || '',
-    d.quantity || 0, d.unit || '', d.credits || 0, d.notes || '',
-    d.canvaLink || '', d.driveLink || '',
-    att.count, att.links, att.names, d.entry_id || d.id || ''
-  ];
-}
-
-function getKpiRow(d, att) {
-  return [
-    d.timestamp || new Date().toISOString(), d.date || '',
-    d.group || '', d.taskId || '', d.taskName || '',
-    d.quantity || 0, d.unit || '', d.credits || 0, d.notes || '',
-    d.canvaLink || '', d.driveLink || '',
-    att.count, att.links, att.names, d.entry_id || d.id || ''
-  ];
-}
-
+// ── Drive folder helpers ────────────────────────────────────
 function getOrCreateFolder(parent, name) {
   var iter = parent.getFoldersByName(name);
   return iter.hasNext() ? iter.next() : parent.createFolder(name);
@@ -519,7 +433,7 @@ function syncDriveFolders(d) {
     if (brands.indexOf('pv') !== -1) { getOrCreateFolder(gFolder, 'PV'); subs.push('PV'); }
     created.push(gName + (subs.length ? ' [' + subs.join(', ') + ']' : ''));
   });
-  return { ok: true, created: created, version: VERSION };
+  return { ok: true, created: created };
 }
 
 function logDeleteUser(d, ss) {
@@ -534,30 +448,39 @@ function logDeleteUser(d, ss) {
   }
 }
 
+// ── doGet — health check ────────────────────────────────────
 function doGet() {
-  return jsonOut({ ok: true, version: VERSION, service: 'JATRACK GAS v4' });
+  return ContentService
+    .createTextOutput(JSON.stringify({ ok: true, version: VERSION, service: 'JATRACK GAS v3' }))
+    .setMimeType(ContentService.MimeType.JSON);
 }
 
+// ── doPost — main entry webhook ─────────────────────────────
 function doPost(e) {
   try {
-    var ss = SpreadsheetApp.getActiveSpreadsheet();
-    var d  = JSON.parse((e && e.postData && e.postData.contents) || '{}');
-    var action = String(d.action || 'upsert_entry');
+    var ss  = SpreadsheetApp.getActiveSpreadsheet();
+    var d   = JSON.parse((e && e.postData && e.postData.contents) || '{}');
 
+    // ── Action routing (v3) ─────────────────────────────────
+    var action = d.action || '';
     if (action === 'sync_drive_folders') {
-      return jsonOut(syncDriveFolders(d));
+      var folderResult = syncDriveFolders(d);
+      return ContentService
+        .createTextOutput(JSON.stringify(folderResult))
+        .setMimeType(ContentService.MimeType.JSON);
     }
     if (action === 'delete_user') {
       logDeleteUser(d, ss);
-      return jsonOut({ ok: true, version: VERSION });
+      return ContentService
+        .createTextOutput(JSON.stringify({ ok: true, version: VERSION }))
+        .setMimeType(ContentService.MimeType.JSON);
     }
 
     var uid      = String(d.uid || '');
     var email    = String(d.email || '');
     var nickname = cleanName(d.nickname || d.name || ('user_' + uid.slice(0, 6)), 'User');
     var role     = cleanName(d.role || 'member', 'member');
-    var kpiName  = cleanName(d.kpiSheet || (nickname + '_KPI'), nickname + '_KPI');
-    var entryId  = String(d.entry_id || d.id || '');
+    var kpiName  = nickname + '_KPI';
     var att      = parseAtt(d);
 
     ensureConfig(ss);
@@ -567,34 +490,50 @@ function doPost(e) {
 
     upsertUser(userReg, uid, email, nickname, role, kpiName);
 
-    if (action === 'delete_entry') {
-      var deletedMaster = deleteRowByEntryId(allEntries, entryId);
-      var deletedKpi = deleteRowByEntryId(kpiSheet, entryId);
-      return jsonOut({ ok: true, version: VERSION, deletedMaster: deletedMaster, deletedKpi: deletedKpi });
-    }
+    // Write to ALL_ENTRIES (master log)
+    allEntries.appendRow([
+      d.timestamp || new Date().toISOString(), d.date || '', uid, email,
+      nickname, role, d.group || '', d.taskId || '', d.taskName || '',
+      d.quantity || 0, d.unit || '', d.credits || 0, d.notes || '',
+      d.canvaLink || '', d.driveLink || '',
+      att.count, att.links, att.names, d.id || ''
+    ]);
 
-    var masterStatus = upsertRow(allEntries, getMasterRow(d, uid, email, nickname, role, att), entryId);
-    var kpiStatus = upsertRow(kpiSheet, getKpiRow(d, att), entryId);
-    return jsonOut({ ok: true, version: VERSION, masterStatus: masterStatus, kpiStatus: kpiStatus, nickname: nickname, kpiSheet: kpiName });
+    // Write to per-user KPI sheet
+    kpiSheet.appendRow([
+      d.timestamp || new Date().toISOString(), d.date || '',
+      d.group || '', d.taskId || '', d.taskName || '',
+      d.quantity || 0, d.unit || '', d.credits || 0, d.notes || '',
+      d.canvaLink || '', d.driveLink || '',
+      att.count, att.links, att.names, d.id || ''
+    ]);
+
+    return ContentService
+      .createTextOutput(JSON.stringify({ ok: true, version: VERSION, nickname: nickname, kpiSheet: kpiName }))
+      .setMimeType(ContentService.MimeType.JSON);
   } catch (err) {
-    return jsonOut({ ok: false, error: String(err), version: VERSION });
+    return ContentService
+      .createTextOutput(JSON.stringify({ ok: false, error: String(err) }))
+      .setMimeType(ContentService.MimeType.JSON);
   }
 }
 
+// ── Admin: run once to initialise all sheets ────────────────
 function adminSetup() {
   var ss = SpreadsheetApp.getActiveSpreadsheet();
   ensureConfig(ss);
   ensureUserRegistry(ss);
   ensureAllEntries(ss);
   SpreadsheetApp.getUi().alert(
-    '✅ JATRACK v4 Setup Complete!\\n\\n' +
+    '✅ JATRACK v3 Setup Complete!\\n\\n' +
     'Sheets created:\\n  _CONFIG\\n  _USER_REGISTRY\\n  ALL_ENTRIES\\n\\n' +
-    'New in v4: entry upsert/delete sync + drive folder sync.\\n\\n' +
+    'New in v3: Drive folder sync + user delete logging.\\n\\n' +
     'Deploy as Web App → Execute as: Me → Anyone access.\\n' +
     'Paste the /exec URL into JATRACK app Settings.'
   );
 }
 
+// ── Admin menu in Google Sheets ─────────────────────────────
 function onOpen() {
   SpreadsheetApp.getUi()
     .createMenu('🟠 JATRACK Admin')
@@ -698,10 +637,6 @@ function EntryCard({
 }) {
   const group = workGroups[entry.groupId];
   const task  = group?.tasks.find((tk) => tk.id === entry.taskId);
-  const entryBrands = getEntryBrands(entry, group, task);
-  const brandLabel = getBrandLabel(entryBrands);
-  const taskName = entry.taskName || task?.name || 'Unknown';
-  const unitLabel = entry.unit || task?.unit || 'หน่วย';
 
   // ── Swipe-to-delete
   const [swipeOffset, setSwipeOffset] = useState(0);
@@ -747,19 +682,9 @@ function EntryCard({
           {group?.icon || entry.groupId.slice(0, 1)}
         </div>
         <div className="flex-1 min-w-0">
-          <div className="flex items-center gap-1.5 min-w-0">
-            <p className="font-bold text-[#2C2A28] text-[13px] leading-tight truncate">{taskName}</p>
-            {brandLabel && (
-              <span
-                className="text-[8px] px-1.5 py-0.5 rounded font-black shrink-0"
-                style={getBrandChipStyle(entryBrands)}
-              >
-                {brandLabel}
-              </span>
-            )}
-          </div>
+          <p className="font-bold text-[#2C2A28] text-[13px] leading-tight truncate">{task?.name || 'Unknown'}</p>
           <p className="text-[10px] text-slate-300 font-semibold uppercase tracking-wider mt-0.5">
-            {entry.quantity} {unitLabel} ·{' '}
+            {entry.quantity} {task?.unit || 'หน่วย'} ·{' '}
             <span className="text-[#F4823C]">{entry.credits} Cr.</span>
           </p>
           {entry.notes ? (
@@ -800,18 +725,18 @@ function EntryCard({
                       const handle = await idbGet(lf.idbKey);
                       if (handle) {
                         try {
-                          const readableHandle = handle as FileHandleWithPermission;
-                          if (typeof readableHandle.requestPermission === 'function') {
-                            const perm = await readableHandle.requestPermission({ mode: 'read' });
-                            if (perm !== 'granted') {
-                              onShowToast('ไฟล์ไม่พร้อมใช้งาน — เปิดบนอุปกรณ์เดิม');
-                              return;
-                            }
+                          const maybePermission =
+                            'requestPermission' in handle
+                              ? await (handle as FileSystemFileHandle & {
+                                requestPermission: (options?: { mode?: 'read' | 'readwrite' }) => Promise<PermissionState>;
+                              }).requestPermission({ mode: 'read' })
+                              : 'granted';
+                          if (maybePermission === 'granted') {
+                            const file = await handle.getFile();
+                            const url  = URL.createObjectURL(file);
+                            window.open(url, '_blank');
+                            return;
                           }
-                          const file = await handle.getFile();
-                          const url  = URL.createObjectURL(file);
-                          window.open(url, '_blank');
-                          return;
                         } catch { /* fall through */ }
                       }
                     }
@@ -850,30 +775,84 @@ function EntryCard({
 
 // ─── NAV BUTTON ──────────────────────────────────────────────────────────────
 function NavButton({
-  active, onClick, icon, label,
+  active, onClick, icon, label, compact = false,
 }: {
-  active: boolean; onClick: () => void; icon: React.ReactNode; label: string;
+  active: boolean; onClick: () => void; icon: React.ReactNode; label: string; compact?: boolean;
 }) {
   return (
     <button
       onClick={onClick}
-      className="flex flex-col items-center gap-1.5 min-w-[56px] transition-all duration-200"
+      className={`flex flex-col items-center gap-1 ${compact ? 'min-w-0' : 'min-w-[56px]'} transition-all duration-200`}
     >
       <div
-        className={`p-2.5 rounded-2xl transition-all duration-200 ${
+        className={`${compact ? 'p-2' : 'p-2.5'} rounded-2xl transition-all duration-200 ${
           active ? 'bg-[#2C2A28] shadow-md text-[#F4823C]' : 'text-slate-300'
         }`}
       >
         {icon}
       </div>
       <span
-        className={`text-[9px] font-bold uppercase tracking-[0.12em] transition-all ${
+        className={`${compact ? 'text-[8px]' : 'text-[9px]'} font-bold uppercase tracking-[0.08em] transition-all text-center ${
           active ? 'text-[#2C2A28]' : 'text-slate-300'
         }`}
       >
         {label}
       </span>
     </button>
+  );
+}
+
+function DailyListField({
+  label,
+  prefix,
+  items,
+  onAdd,
+  onChange,
+  onRemove,
+}: {
+  label: string;
+  prefix: string;
+  items: string[];
+  onAdd: () => void;
+  onChange: (index: number, value: string) => void;
+  onRemove: (index: number) => void;
+}) {
+  return (
+    <div className="space-y-3">
+      <div className="flex items-center justify-between gap-2">
+        <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">{label}</label>
+        <button
+          type="button"
+          onClick={onAdd}
+          className="px-3 py-1.5 rounded-xl bg-orange-50 text-[#F4823C] text-[10px] font-bold border border-orange-100 flex items-center gap-1.5"
+        >
+          <Plus size={12} /> Add
+        </button>
+      </div>
+      <div className="space-y-2">
+        {items.map((item, index) => (
+          <div key={`${prefix}_${index}`} className="flex items-center gap-2">
+            <div className="w-9 h-9 rounded-xl bg-orange-50 border border-orange-100 text-[#F4823C] flex items-center justify-center text-[10px] font-black shrink-0">
+              {prefix === '✔️' ? prefix : `${prefix}${index + 1}`}
+            </div>
+            <input
+              type="text"
+              value={item}
+              onChange={(e) => onChange(index, e.target.value)}
+              className="flex-1 px-4 py-3 bg-[#FDFAF7] border border-slate-200 rounded-xl text-[13px] outline-none"
+              placeholder={label}
+            />
+            <button
+              type="button"
+              onClick={() => onRemove(index)}
+              className="w-9 h-9 rounded-xl bg-slate-50 border border-slate-100 text-slate-300 flex items-center justify-center shrink-0"
+            >
+              <Trash2 size={13} />
+            </button>
+          </div>
+        ))}
+      </div>
+    </div>
   );
 }
 
@@ -912,23 +891,11 @@ function KpiEditor({
   const updateGroupIcon = (gKey: string, icon: string) =>
     setDraft(prev => ({ ...prev, [gKey]: { ...prev[gKey], icon: icon || undefined } }));
 
-  const toggleTaskBrand = (gKey: string, taskId: string, brand: BrandId, checked: boolean) =>
+  const toggleGroupBrand = (gKey: string, brand: 'y8' | 'pv', checked: boolean) =>
     setDraft(prev => {
-      const group = prev[gKey];
-      const tasks = group.tasks.map((task) => {
-        if (task.id !== taskId) return task;
-        const cur = getTaskBrands(task, group);
-        const next = checked ? normalizeBrands([...cur, brand]) : cur.filter((b) => b !== brand);
-        return { ...task, brands: next };
-      });
-      return {
-        ...prev,
-        [gKey]: {
-          ...group,
-          tasks,
-          brands: normalizeBrands(tasks.flatMap((task) => task.brands || [])),
-        },
-      };
+      const cur = prev[gKey].brands || [];
+      const next = checked ? ([...cur, brand] as ('y8' | 'pv')[]) : cur.filter(b => b !== brand);
+      return { ...prev, [gKey]: { ...prev[gKey], brands: next } };
     });
 
   // ── Task CRUD
@@ -952,14 +919,7 @@ function KpiEditor({
       ...prev,
       [gKey]: {
         ...prev[gKey],
-        tasks: [...prev[gKey].tasks, {
-          id: newId,
-          name: 'New Task',
-          creditPerUnit: 1,
-          unit: 'Artwork',
-          desc: '',
-          brands: normalizeBrands(prev[gKey].brands),
-        }],
+        tasks: [...prev[gKey].tasks, { id: newId, name: 'New Task', creditPerUnit: 1, unit: 'Artwork', desc: '' }],
       },
     }));
   };
@@ -984,7 +944,7 @@ function KpiEditor({
         color: palette.color,
         bg: palette.bg,
         border: palette.bg,
-        tasks: [{ id: `${key}-01`, name: 'New Task', creditPerUnit: 1, unit: 'Artwork', desc: '', brands: [] }],
+        tasks: [{ id: `${key}-01`, name: 'New Task', creditPerUnit: 1, unit: 'Artwork', desc: '' }],
       },
     }));
     setExpandedGroup(key);
@@ -1119,18 +1079,25 @@ function KpiEditor({
                   ) : (
                     <p className="font-bold text-[#2C2A28] text-[13px] truncate">{group.name}</p>
                   )}
-                  {/* Group brand summary */}
+                  {/* Brand chips */}
                   <div className="flex items-center gap-2 mt-0.5">
-                    {getBrandLabel(group.brands) ? (
-                      <span
-                        className="text-[8px] px-1.5 py-0.5 rounded font-black shrink-0"
-                        style={getBrandChipStyle(group.brands)}
+                    {(['y8', 'pv'] as const).map(brand => (
+                      <label
+                        key={brand}
+                        className="flex items-center gap-1 text-[10px] cursor-pointer select-none"
+                        onClick={e => e.stopPropagation()}
                       >
-                        {getBrandLabel(group.brands)}
-                      </span>
-                    ) : (
-                      <span className="text-[9px] text-slate-300">ยังไม่ได้กำหนดแบรนด์</span>
-                    )}
+                        <input
+                          type="checkbox"
+                          checked={(group.brands || []).includes(brand)}
+                          onChange={e => toggleGroupBrand(key, brand, e.target.checked)}
+                          className="w-3 h-3 accent-[#F4823C]"
+                        />
+                        <span className="font-bold" style={{ color: brand === 'y8' ? '#F4823C' : '#E87AA5' }}>
+                          {brand === 'y8' ? 'Y8' : 'PV'}
+                        </span>
+                      </label>
+                    ))}
                     <span className="text-[9px] text-slate-300">{group.tasks.length} รายการ</span>
                   </div>
                 </div>
@@ -1179,31 +1146,21 @@ function KpiEditor({
               <div className="px-4 pb-4 pt-3 space-y-2.5">
                 {group.tasks.map((task) => (
                   <div key={task.id} className="bg-[#FDFAF7] rounded-[14px] p-3 space-y-2.5 border border-slate-100">
-                    <div className="flex items-center justify-between gap-2">
+                    <div className="flex items-center justify-between">
                       <span
                         className="text-[9px] font-black uppercase tracking-widest px-2 py-0.5 rounded-md"
                         style={{ backgroundColor: group.bg, color: group.color }}
                       >
                         {task.id}
                       </span>
-                      <div className="flex items-center gap-1.5">
-                        {getBrandLabel(getTaskBrands(task, group)) && (
-                          <span
-                            className="text-[8px] px-1.5 py-0.5 rounded font-black shrink-0"
-                            style={getBrandChipStyle(getTaskBrands(task, group))}
-                          >
-                            {getBrandLabel(getTaskBrands(task, group))}
-                          </span>
-                        )}
-                        {group.tasks.length > 1 && (
-                          <button
-                            onClick={() => deleteTask(key, task.id)}
-                            className="w-6 h-6 flex items-center justify-center text-rose-300 active:text-rose-500 transition-colors"
-                          >
-                            <Trash2 size={12} />
-                          </button>
-                        )}
-                      </div>
+                      {group.tasks.length > 1 && (
+                        <button
+                          onClick={() => deleteTask(key, task.id)}
+                          className="w-6 h-6 flex items-center justify-center text-rose-300 active:text-rose-500 transition-colors"
+                        >
+                          <Trash2 size={12} />
+                        </button>
+                      )}
                     </div>
                     <input
                       type="text"
@@ -1219,27 +1176,6 @@ function KpiEditor({
                       className="w-full px-3 py-2 bg-white border border-slate-200 rounded-xl text-[11px] text-slate-400 outline-none focus:border-orange-300"
                       placeholder="คำอธิบาย (ไม่บังคับ)"
                     />
-                    <div className="space-y-1">
-                      <label className="text-[8px] font-bold text-slate-400 uppercase tracking-widest">แบรนด์</label>
-                      <div className="flex items-center gap-2">
-                        {BRAND_OPTIONS.map((brand) => (
-                          <label
-                            key={brand}
-                            className="flex items-center gap-1 text-[10px] cursor-pointer select-none bg-white border border-slate-200 rounded-full px-2 py-1"
-                          >
-                            <input
-                              type="checkbox"
-                              checked={getTaskBrands(task, group).includes(brand)}
-                              onChange={(e) => toggleTaskBrand(key, task.id, brand, e.target.checked)}
-                              className="w-3 h-3 accent-[#F4823C]"
-                            />
-                            <span className="font-bold" style={{ color: brand === 'y8' ? '#F4823C' : '#E87AA5' }}>
-                              {brand === 'y8' ? 'Y8' : 'PV'}
-                            </span>
-                          </label>
-                        ))}
-                      </div>
-                    </div>
                     <div className="grid grid-cols-3 gap-2">
                       <div className="col-span-1 space-y-1">
                         <label className="text-[8px] font-bold text-slate-400 uppercase tracking-widest">Cr/Unit</label>
@@ -1359,28 +1295,12 @@ const LoadingScreen = () => (
 
 // ─── SIGN IN SCREEN ───────────────────────────────────────────────────────────
 const SignInScreen = ({
-  onSignIn, onEmailSignIn, loading, toast,
+  onSignIn, loading, toast,
 }: {
   onSignIn: () => void;
-  onEmailSignIn: (email: string, password: string) => Promise<void>;
   loading: boolean;
   toast: { show: boolean; message: string };
 }) => {
-  const [mode, setMode] = React.useState<'google' | 'email'>('google');
-  const [email, setEmail] = React.useState('');
-  const [password, setPassword] = React.useState('');
-  const [emailLoading, setEmailLoading] = React.useState(false);
-
-  const handleEmail = async () => {
-    if (!email.trim() || !password.trim()) return;
-    setEmailLoading(true);
-    try {
-      await onEmailSignIn(email.trim(), password);
-    } finally {
-      setEmailLoading(false);
-    }
-  };
-
   return (
     <div className="flex flex-col min-h-[100dvh] max-w-md mx-auto bg-[#FDFAF7] items-center justify-center px-7">
       <Toast {...toast} />
@@ -1400,58 +1320,32 @@ const SignInScreen = ({
         <p className="text-[11px] text-[#F4823C] font-bold mt-0.5 tracking-[0.35em] uppercase">KPI Tracker</p>
       </div>
 
-      {/* Tab switcher */}
-      <div className="w-full flex bg-slate-100 rounded-2xl p-1 mb-5 relative z-10">
-        <button onClick={() => setMode('google')}
-          className={`flex-1 py-2.5 rounded-xl text-[12px] font-bold transition-all ${mode === 'google' ? 'bg-white shadow-sm text-[#2C2A28]' : 'text-slate-400'}`}>
-          🔵 Google
-        </button>
-        <button onClick={() => setMode('email')}
-          className={`flex-1 py-2.5 rounded-xl text-[12px] font-bold transition-all ${mode === 'email' ? 'bg-white shadow-sm text-[#2C2A28]' : 'text-slate-400'}`}>
-          ✉️ Email
-        </button>
+      <div className="w-full bg-white/70 border border-orange-100 rounded-2xl px-4 py-3 mb-5 relative z-10 shadow-sm">
+        <p className="text-[10px] font-bold text-[#F4823C] uppercase tracking-widest mb-1">Google Only</p>
+        <p className="text-[12px] text-slate-500 leading-relaxed">
+          เข้าใช้งานด้วยบัญชี Google เท่านั้น เพื่อให้เชื่อม Drive, Sheets และสิทธิ์ผู้ใช้สอดคล้องกันทั้งระบบ
+        </p>
       </div>
 
       <div className="w-full space-y-3 animate-in slide-in-from-bottom duration-500 relative z-10">
-        {mode === 'google' ? (
-          <>
-            <button onClick={onSignIn} disabled={loading}
-              className="w-full py-4 bg-white border border-orange-100 rounded-2xl font-bold text-[14px] text-[#2C2A28] tracking-wide shadow-sm active:scale-95 transition-all flex items-center justify-center gap-3 disabled:opacity-60"
-              style={{ boxShadow: '0 4px 20px rgba(244,130,60,0.12)' }}>
-              {loading ? <RefreshCw size={18} className="animate-spin text-orange-300" /> : (
-                <>
-                  <svg width="20" height="20" viewBox="0 0 24 24" fill="none">
-                    <path d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z" fill="#4285F4"/>
-                    <path d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" fill="#34A853"/>
-                    <path d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l3.66-2.84z" fill="#FBBC05"/>
-                    <path d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z" fill="#EA4335"/>
-                  </svg>
-                  Sign in with Google
-                </>
-              )}
-            </button>
-            <p className="text-center text-[10px] text-slate-300">
-              แนะนำ · รองรับ Google Drive &amp; Sheets อัตโนมัติ
-            </p>
-          </>
-        ) : (
-          <>
-            <input type="email" placeholder="อีเมล" value={email} onChange={e => setEmail(e.target.value)}
-              className="w-full px-4 py-3.5 bg-white border border-slate-200 rounded-2xl text-[13px] outline-none"
-              onKeyDown={e => e.key === 'Enter' && void handleEmail()} />
-            <input type="password" placeholder="รหัสผ่าน (6 ตัวขึ้นไป)" value={password} onChange={e => setPassword(e.target.value)}
-              className="w-full px-4 py-3.5 bg-white border border-slate-200 rounded-2xl text-[13px] outline-none"
-              onKeyDown={e => e.key === 'Enter' && void handleEmail()} />
-            <button onClick={() => void handleEmail()} disabled={emailLoading || !email || !password}
-              className="w-full py-4 rounded-2xl font-bold text-[14px] text-white active:scale-95 transition-all disabled:opacity-50 flex items-center justify-center gap-2"
-              style={{ background: 'linear-gradient(135deg, #F4823C, #F5A855)' }}>
-              {emailLoading ? <RefreshCw size={16} className="animate-spin" /> : '🔑 เข้าสู่ระบบด้วยรหัสผ่าน'}
-            </button>
-            <p className="text-center text-[10px] text-slate-300">
-              ใช้ได้หลังจากเข้า Google ครั้งแรกและตั้งรหัสผ่านใน Settings
-            </p>
-          </>
-        )}
+        <button onClick={onSignIn} disabled={loading}
+          className="w-full py-4 bg-white border border-orange-100 rounded-2xl font-bold text-[14px] text-[#2C2A28] tracking-wide shadow-sm active:scale-95 transition-all flex items-center justify-center gap-3 disabled:opacity-60"
+          style={{ boxShadow: '0 4px 20px rgba(244,130,60,0.12)' }}>
+          {loading ? <RefreshCw size={18} className="animate-spin text-orange-300" /> : (
+            <>
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none">
+                <path d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z" fill="#4285F4"/>
+                <path d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" fill="#34A853"/>
+                <path d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l3.66-2.84z" fill="#FBBC05"/>
+                <path d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z" fill="#EA4335"/>
+              </svg>
+              Sign in with Google
+            </>
+          )}
+        </button>
+        <p className="text-center text-[10px] text-slate-300">
+          รองรับ Google Drive, Google Sheets และสิทธิ์ตามบัญชีโดยตรง
+        </p>
       </div>
 
       <p className="absolute bottom-6 left-0 right-0 text-center text-[9px] text-slate-300 tracking-widest">
@@ -1526,33 +1420,31 @@ export default function App() {
   const [signInLoading, setSignInLoading]   = useState(false);
 
   // ── User Profile + Access Policy
-  const [viewerProfile, setViewerProfile]   = useState<UserProfile | null>(null);
   const [userProfile, setUserProfile]       = useState<UserProfile | null>(null);
   const [profileLoading, setProfileLoading] = useState(false);
-  const [effectiveProfileLoading, setEffectiveProfileLoading] = useState(false);
   const [nicknameDraft, setNicknameDraft]   = useState('');
 
   // ── KPI Config
-  const [kpiConfig, setKpiConfig]           = useState<WorkGroups>(() => migrateWorkGroups(WORK_GROUPS));
+  const [kpiConfig, setKpiConfig]           = useState<WorkGroups>(WORK_GROUPS);
   const [monthlyTarget, setMonthlyTarget]   = useState<number>(0);
   const [showKpiEditor, setShowKpiEditor]   = useState(false);
 
   // ── App state
   const [entries, setEntries]               = useState<WorkEntry[]>([]);
   const [activeTab, setActiveTab]           = useState<TabType>('log');
+  const [dailyTab, setDailyTab]             = useState<'morning' | 'evening' | 'history'>('morning');
   const [toast, setToast]                   = useState({ show: false, message: '' });
   const [isLoading, setIsLoading]           = useState(false);
   const [isOnline, setIsOnline]             = useState(navigator.onLine);
 
   const [sheetUrl, setSheetUrl]             = useState<string>('');
-  const [giftBackfillBusy, setGiftBackfillBusy] = useState(false);
-  const [giftBackfillStatus, setGiftBackfillStatus] = useState('');
   const [geminiApiKey, setGeminiApiKey]     = useState('');
   const [geminiResult, setGeminiResult]     = useState('');
   const [geminiLoading, setGeminiLoading]   = useState(false);
   const [showGemini, setShowGemini]         = useState(false);
 
   const [selectedDate, setSelectedDate]     = useState(getTodayStr());
+  const [dailyDate, setDailyDate]           = useState(getTodayStr());
   const [selectedGroup, setSelectedGroup]   = useState<string>('A');
   const [selectedTaskId, setSelectedTaskId] = useState<string>(
     Object.values(WORK_GROUPS)[0]?.tasks[0]?.id || 'A01'
@@ -1573,8 +1465,21 @@ export default function App() {
   const [adminEntries, setAdminEntries]     = useState<WorkEntry[]>([]);
   const [adminTargets, setAdminTargets]     = useState<Record<string, number>>({});
   const [adminLoading, setAdminLoading]     = useState(false);
-  const [actingAsUid, setActingAsUid]       = useState<string | null>(null);
-  const [showSwitchUserModal, setShowSwitchUserModal] = useState(false);
+  const [dailyReports, setDailyReports]     = useState<DailyReport[]>([]);
+  const [dailyReportsLoading, setDailyReportsLoading] = useState(false);
+  const [dailySaving, setDailySaving]       = useState(false);
+  const [dailyCopySuccess, setDailyCopySuccess] = useState(false);
+  const [reportGender, setReportGender]     = useState<'male' | 'female'>('male');
+  const [reportEmojis, setReportEmojis]     = useState(DEFAULT_REPORT_EMOJIS);
+  const [morningCheckInTime, setMorningCheckInTime] = useState(getCurrentTimeHM());
+  const [morningFocusItems, setMorningFocusItems] = useState<string[]>(['']);
+  const [eveningRoutineItems, setEveningRoutineItems] = useState<string[]>(['']);
+  const [eveningResultItems, setEveningResultItems] = useState<string[]>(['']);
+  const [eveningNextMoveItems, setEveningNextMoveItems] = useState<string[]>(['']);
+  const [dailyIssues, setDailyIssues]       = useState('');
+  const [dailyIssueStatus, setDailyIssueStatus] = useState<'resolved' | 'unresolved'>('resolved');
+  const [dailyIssueDetail, setDailyIssueDetail] = useState('');
+  const [dailyIssueNextStep, setDailyIssueNextStep] = useState('');
 
   // ── Integration states
   const [sheetsWebhookUrl, setSheetsWebhookUrl] = useState('');
@@ -1599,6 +1504,7 @@ export default function App() {
   const editDriveInputRef = useRef<HTMLInputElement | null>(null);
   // Cache Drive subfolder IDs to avoid repeated API lookups per session
   const subfolderCache = useRef(new Map<string, string>());
+  const isSuperAdmin = isSuperAdminEmail(currentUser?.email);
 
   // ── New v3 states
   const [syncQueueCount, setSyncQueueCount]       = useState(0);
@@ -1606,79 +1512,11 @@ export default function App() {
   const [showDriveTreeModal, setShowDriveTreeModal] = useState(false);
   const [driveTreeLoading, setDriveTreeLoading]   = useState(false);
   const [pendingLocalFiles, setPendingLocalFiles] = useState<LocalFileRef[]>([]);
-  const [currentPasswordDraft, setCurrentPasswordDraft] = useState('');
-  const [newPasswordDraft, setNewPasswordDraft] = useState('');
-  const [confirmPasswordDraft, setConfirmPasswordDraft] = useState('');
-  const [passwordSaving, setPasswordSaving] = useState(false);
 
   // ── Group expand/collapse + brand/icon management
   const [expandedGroups, setExpandedGroups]     = useState<Set<string>>(new Set());
   const [autoHoverExpand, setAutoHoverExpand]   = useState(false);
   const [hoveredGroup, setHoveredGroup]         = useState<string | null>(null);
-  const [logBrandMode, setLogBrandMode]         = useState<BrandMode>('all');
-  const [summaryBrandMode, setSummaryBrandMode] = useState<BrandMode>('all');
-  const isSuperAdmin = isSuperAdminEmail(currentUser?.email);
-  const effectiveUid = actingAsUid || currentUser?.uid || '';
-  const isActingAs = Boolean(isSuperAdmin && actingAsUid && actingAsUid !== currentUser?.uid);
-  const hasPasswordLogin = Boolean(currentUser?.providerData.some((provider) => provider.providerId === 'password'));
-
-  const getEntriesCacheKey = (targetUid: string) => {
-    if (!currentUser) return '';
-    return scopedKey(
-      currentUser.uid,
-      targetUid === currentUser.uid ? 'entries_v8' : `entries_v8_${targetUid}`
-    );
-  };
-
-  const readStoredUserSettings = (uid: string): StoredUserSettings => {
-    const read = (key: string) => localStorage.getItem(scopedKey(uid, key)) ?? '';
-    const savedHover = read('auto_hover_expand');
-    let autoHover = DEFAULT_USER_SETTINGS.autoHoverExpand;
-    if (savedHover) {
-      try {
-        autoHover = JSON.parse(savedHover) as boolean;
-      } catch {
-        autoHover = DEFAULT_USER_SETTINGS.autoHoverExpand;
-      }
-    }
-    return {
-      autoHoverExpand: autoHover,
-      calY8Url: read('cal_y8'),
-      calPvUrl: read('cal_pv'),
-      driveFolderId: read('drive_folder_id'),
-      sheetUrl: read('sheet_url'),
-    };
-  };
-
-  const applyUserSettings = (settings: Partial<StoredUserSettings>) => {
-    if (settings.autoHoverExpand !== undefined) setAutoHoverExpand(Boolean(settings.autoHoverExpand));
-    if (settings.calY8Url !== undefined) setCalY8Url(settings.calY8Url || '');
-    if (settings.calPvUrl !== undefined) setCalPvUrl(settings.calPvUrl || '');
-    if (settings.driveFolderId !== undefined) setDriveFolderId(settings.driveFolderId || '');
-    if (settings.sheetUrl !== undefined) setSheetUrl(settings.sheetUrl || '');
-  };
-
-  const persistLocalUserSettings = (uid: string, settings: StoredUserSettings) => {
-    localStorage.setItem(scopedKey(uid, 'sheet_url'), settings.sheetUrl);
-    localStorage.setItem(scopedKey(uid, 'cal_y8'), settings.calY8Url);
-    localStorage.setItem(scopedKey(uid, 'cal_pv'), settings.calPvUrl);
-    localStorage.setItem(scopedKey(uid, 'drive_folder_id'), settings.driveFolderId);
-    localStorage.setItem(scopedKey(uid, 'auto_hover_expand'), JSON.stringify(settings.autoHoverExpand));
-  };
-
-  const orderedGroupKeys = useMemo(
-    () => Object.keys(kpiConfig).sort(),
-    [kpiConfig]
-  );
-
-  const visibleLogGroupKeys = useMemo(
-    () =>
-      orderedGroupKeys.filter((key) => {
-        if (logBrandMode === 'all') return true;
-        return getVisibleTasksForGroup(kpiConfig[key], logBrandMode).length > 0;
-      }),
-    [kpiConfig, logBrandMode, orderedGroupKeys]
-  );
 
   // ── Offline detection
   useEffect(() => {
@@ -1692,13 +1530,37 @@ export default function App() {
     };
   }, []);
 
-  // ── Load signed-in user's cached settings
+  // ── Load per-user integration settings
   useEffect(() => {
     if (!currentUser) return;
-    applyUserSettings(readStoredUserSettings(currentUser.uid));
-    const savedWebhook = localStorage.getItem(scopedKey(currentUser.uid, 'sheets_webhook')) ?? '';
+    const uid = currentUser.uid;
+    const readSetting = (key: string, fallback = '') =>
+      localStorage.getItem(scopedKey(uid, key)) ?? fallback;
+
+    setSheetUrl(readSetting('sheet_url', ''));
+    // Always use DEFAULT_GAS_WEBHOOK unless admin has explicitly saved a different one
+    const savedWebhook = readSetting('sheets_webhook', '');
     setSheetsWebhookUrl(savedWebhook || DEFAULT_GAS_WEBHOOK);
-    setGeminiApiKey(localStorage.getItem(scopedKey(currentUser.uid, 'gemini_api_key')) ?? '');
+    setCalY8Url(readSetting('cal_y8', ''));
+    setCalPvUrl(readSetting('cal_pv', ''));
+    setDriveFolderId(readSetting('drive_folder_id', ''));
+    setGeminiApiKey(readSetting('gemini_api_key', ''));
+    const savedGender = readSetting('report_gender', 'male');
+    setReportGender(savedGender === 'female' ? 'female' : 'male');
+    const rawEmojiSettings = readSetting('report_emojis', '');
+    if (rawEmojiSettings) {
+      try {
+        setReportEmojis({ ...DEFAULT_REPORT_EMOJIS, ...(JSON.parse(rawEmojiSettings) as Partial<typeof DEFAULT_REPORT_EMOJIS>) });
+      } catch {
+        setReportEmojis(DEFAULT_REPORT_EMOJIS);
+      }
+    } else {
+      setReportEmojis(DEFAULT_REPORT_EMOJIS);
+    }
+    const savedHover = readSetting('auto_hover_expand', '');
+    if (savedHover) {
+      try { setAutoHoverExpand(JSON.parse(savedHover) as boolean); } catch { /* ignore */ }
+    }
   }, [currentUser]);
 
   // ── Init syncQueueCount when user changes
@@ -1708,23 +1570,17 @@ export default function App() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentUser]);
 
-  // ── Sync drafts when Settings opens or acting user changes
+  // ── Sync customTitleDraft when Settings opens
   useEffect(() => {
     if (!showSettings) return;
-    setNicknameDraft(userProfile?.nickname || '');
-    setCustomTitleDraft(userProfile?.customTitle || '');
-    setCurrentPasswordDraft('');
-    setNewPasswordDraft('');
-    setConfirmPasswordDraft('');
-  }, [showSettings, userProfile]);
+    if (userProfile?.customTitle !== undefined) setCustomTitleDraft(userProfile.customTitle || '');
+  }, [showSettings]);
 
   // ── localStorage offline cache
   useEffect(() => {
-    if (!currentUser || !effectiveUid) return;
-    const cacheKey = getEntriesCacheKey(effectiveUid);
-    if (!cacheKey) return;
-    localStorage.setItem(cacheKey, JSON.stringify(entries));
-  }, [entries, currentUser, effectiveUid]);
+    if (!currentUser) return;
+    localStorage.setItem(scopedKey(currentUser.uid, 'entries_v8'), JSON.stringify(entries));
+  }, [entries, currentUser]);
 
   const showToast = (message: string) => {
     setToast({ show: true, message });
@@ -1752,23 +1608,35 @@ export default function App() {
     setSyncQueueCount(trimmed.length);
   };
 
+  const postSheetsWebhook = async (payload: Record<string, unknown>) => {
+    if (!sheetsWebhookUrl) return false;
+    const body = JSON.stringify(payload);
+    const isAppsScript = /script\.google\.com\/macros\/s\//.test(sheetsWebhookUrl);
+    if (isAppsScript && typeof navigator !== 'undefined' && typeof navigator.sendBeacon === 'function') {
+      const blob = new Blob([body], { type: 'text/plain;charset=utf-8' });
+      return navigator.sendBeacon(sheetsWebhookUrl, blob);
+    }
+    await fetch(sheetsWebhookUrl, {
+      method: 'POST',
+      mode: 'no-cors',
+      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+      body,
+    });
+    return true;
+  };
+
   // ── Firebase Auth listener (Phase 3)
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, (user) => {
       setCurrentUser(user);
-      if (!user) {
-        setViewerProfile(null);
-        setUserProfile(null);
-        setActingAsUid(null);
-      }
       setAuthLoading(false);
     });
     return () => unsubscribe();
   }, []);
 
-  // ── Signed-in user profile listener + role policy by email
+  // ── User profile listener + role policy by email
   useEffect(() => {
-    if (!currentUser) { setViewerProfile(null); return; }
+    if (!currentUser) { setUserProfile(null); return; }
     setProfileLoading(true);
     const forcedRole = resolveRoleByEmail(currentUser.email);
     const forcedAdmin = isSuperAdminEmail(currentUser.email);
@@ -1790,14 +1658,20 @@ export default function App() {
             createdAt: profile.createdAt || now,
             updatedAt: now,
           };
-          setViewerProfile(merged);
-          if (!isActingAs) {
-            setUserProfile(merged);
-            setNicknameDraft(merged.nickname || '');
-            applyUserSettings({
-              ...DEFAULT_USER_SETTINGS,
-              ...(profile.settings || {}),
-            });
+          setUserProfile(merged);
+          setNicknameDraft(merged.nickname || '');
+          // ── Load persistent settings + customTitle from Firestore
+          if (profile.customTitle) setCustomTitleDraft(profile.customTitle);
+          if (profile.settings) {
+            const s = profile.settings;
+            if (s.autoHoverExpand !== undefined) setAutoHoverExpand(s.autoHoverExpand);
+            if (s.calY8Url)       setCalY8Url(s.calY8Url);
+            if (s.calPvUrl)       setCalPvUrl(s.calPvUrl);
+            if (s.driveFolderId)  setDriveFolderId(s.driveFolderId);
+            if (s.sheetUrl)       setSheetUrl(s.sheetUrl);
+            if (s.reportGender)   setReportGender(s.reportGender);
+            if (s.reportEmojis)   setReportEmojis({ ...DEFAULT_REPORT_EMOJIS, ...s.reportEmojis });
+            if (isSuperAdmin && s.sheetsWebhookUrl) setSheetsWebhookUrl(s.sheetsWebhookUrl);
           }
 
           if (
@@ -1829,12 +1703,8 @@ export default function App() {
             updatedAt: now,
           };
           await setDoc(doc(db, 'users', currentUser.uid), profile, { merge: true });
-          setViewerProfile(profile);
-          if (!isActingAs) {
-            setUserProfile(profile);
-            setNicknameDraft('');
-            applyUserSettings(DEFAULT_USER_SETTINGS);
-          }
+          setUserProfile(profile);
+          setNicknameDraft('');
         }
         setProfileLoading(false);
       },
@@ -1844,60 +1714,19 @@ export default function App() {
       }
     );
     return () => unsubscribe();
-  }, [currentUser, isActingAs]);
+  }, [currentUser]);
 
-  // ── Effective profile listener for act-as-user
+  // ── KPI config listener (per user)
   useEffect(() => {
-    if (!currentUser) { setUserProfile(null); return; }
-    if (!isActingAs || !actingAsUid) {
-      setEffectiveProfileLoading(false);
-      setUserProfile(viewerProfile);
-      return;
-    }
-
-    setEffectiveProfileLoading(true);
+    if (!currentUser) return;
     const unsubscribe = onSnapshot(
-      doc(db, 'users', actingAsUid),
-      (snap) => {
-        if (snap.exists()) {
-          const profile = snap.data() as UserProfile;
-          setUserProfile(profile);
-          applyUserSettings({
-            ...DEFAULT_USER_SETTINGS,
-            ...(profile.settings || {}),
-          });
-        } else {
-          setUserProfile(null);
-          applyUserSettings(DEFAULT_USER_SETTINGS);
-        }
-        setEffectiveProfileLoading(false);
-      },
-      (err) => {
-        console.warn('Effective profile listener:', err.message);
-        setEffectiveProfileLoading(false);
-      }
-    );
-    return () => unsubscribe();
-  }, [actingAsUid, currentUser, isActingAs, viewerProfile]);
-
-  // ── KPI config listener (per effective user)
-  useEffect(() => {
-    if (!currentUser || !effectiveUid) return;
-    const unsubscribe = onSnapshot(
-      doc(db, 'kpiConfigs', effectiveUid),
+      doc(db, 'kpiConfigs', currentUser.uid),
       async (snap) => {
-        const actingProfile = actingAsUid ? adminProfiles.find((profile) => profile.uid === actingAsUid) : null;
-        const initial = getInitialKpiForEmail(
-          isActingAs ? (userProfile?.email || actingProfile?.email) : currentUser.email
-        );
+        const initial = getInitialKpiForEmail(currentUser.email);
         if (snap.exists() && snap.data()?.groups) {
           const data = snap.data()!;
-          const migratedGroups = migrateWorkGroups(data.groups as WorkGroups);
-          const needsBrandMigration = JSON.stringify(migratedGroups) !== JSON.stringify(data.groups);
           const mustResetToPolicy =
-            !isActingAs &&
-            !isHostEmail(currentUser.email) &&
-            Number(data.policyVersion || 0) < KPI_POLICY_VERSION;
+            !isHostEmail(currentUser.email) && Number(data.policyVersion || 0) < KPI_POLICY_VERSION;
 
           if (mustResetToPolicy) {
             setKpiConfig(initial.groups);
@@ -1913,44 +1742,33 @@ export default function App() {
                 updatedAt: Date.now(),
               }, { merge: true });
           } else {
-            setKpiConfig(migratedGroups);
+            setKpiConfig(data.groups as WorkGroups);
             setMonthlyTarget(Math.max(0, Number(data.monthlyTarget || 0)));
-            if (needsBrandMigration && !isActingAs) {
-              await setDoc(doc(db, 'kpiConfigs', currentUser.uid), {
-                groups: migratedGroups,
-                updatedAt: Date.now(),
-              }, { merge: true });
-            }
           }
         } else {
           setKpiConfig(initial.groups);
           setMonthlyTarget(initial.monthlyTarget);
-          if (!isActingAs) {
-            await setDoc(doc(db, 'kpiConfigs', currentUser.uid), {
-              uid: currentUser.uid,
-              roleId: initial.roleId,
-              label: initial.label,
-              groups: initial.groups,
-              monthlyTarget: initial.monthlyTarget,
-              policyVersion: KPI_POLICY_VERSION,
-              seededAt: Date.now(),
-              updatedAt: Date.now(),
-            }, { merge: true });
-          }
+          await setDoc(doc(db, 'kpiConfigs', currentUser.uid), {
+            uid: currentUser.uid,
+            roleId: initial.roleId,
+            label: initial.label,
+            groups: initial.groups,
+            monthlyTarget: initial.monthlyTarget,
+            policyVersion: KPI_POLICY_VERSION,
+            seededAt: Date.now(),
+            updatedAt: Date.now(),
+          }, { merge: true });
         }
       },
       (err) => {
         console.warn('KPI Config listener:', err.message);
-        const actingProfile = actingAsUid ? adminProfiles.find((profile) => profile.uid === actingAsUid) : null;
-        const initial = getInitialKpiForEmail(
-          isActingAs ? (userProfile?.email || actingProfile?.email) : currentUser.email
-        );
+        const initial = getInitialKpiForEmail(currentUser.email);
         setKpiConfig(initial.groups);
         setMonthlyTarget(initial.monthlyTarget);
       }
     );
     return () => unsubscribe();
-  }, [actingAsUid, adminProfiles, currentUser, effectiveUid, isActingAs, userProfile]);
+  }, [currentUser]);
 
   // ── Admin-only global visibility
   useEffect(() => {
@@ -2008,11 +1826,11 @@ export default function App() {
 
   // ── Firestore entries listener (Phase 3: use uid)
   useEffect(() => {
-    if (!currentUser || !effectiveUid) return;
+    if (!currentUser) return;
     setIsLoading(true);
 
     const q = query(
-      collection(db, 'users', effectiveUid, 'entries'),
+      collection(db, 'users', currentUser.uid, 'entries'),
       orderBy('createdAt', 'desc')
     );
 
@@ -2025,7 +1843,7 @@ export default function App() {
       },
       (error) => {
         console.error('Firestore:', error);
-        const saved = localStorage.getItem(getEntriesCacheKey(effectiveUid));
+        const saved = localStorage.getItem(scopedKey(currentUser.uid, 'entries_v8'));
         if (saved) try { setEntries(JSON.parse(saved)); } catch { /* ignore */ }
         setIsLoading(false);
         showToast('⚠️ ใช้ข้อมูล offline');
@@ -2033,7 +1851,37 @@ export default function App() {
     );
 
     return () => unsubscribe();
-  }, [currentUser, effectiveUid]);
+  }, [currentUser]);
+
+  // ── Firestore daily reports listener
+  useEffect(() => {
+    if (!currentUser) {
+      setDailyReports([]);
+      setDailyReportsLoading(false);
+      return;
+    }
+    setDailyReportsLoading(true);
+
+    const q = query(
+      collection(db, 'users', currentUser.uid, 'dailyReports'),
+      orderBy('updatedAt', 'desc')
+    );
+
+    const unsubscribe = onSnapshot(
+      q,
+      (snapshot) => {
+        setDailyReports(snapshot.docs.map((d) => ({ ...d.data() } as DailyReport)));
+        setDailyReportsLoading(false);
+      },
+      (error) => {
+        console.error('Daily reports:', error);
+        setDailyReports([]);
+        setDailyReportsLoading(false);
+      }
+    );
+
+    return () => unsubscribe();
+  }, [currentUser]);
 
   // ── Calendar iCal fetch (fetches when Today tab is active)
   useEffect(() => {
@@ -2072,52 +1920,18 @@ export default function App() {
   // ── Keep selected group/task valid after config changes
   useEffect(() => {
     const keys = Object.keys(kpiConfig);
-    if (!keys.length) {
-      if (selectedGroup) setSelectedGroup('');
-      if (selectedTaskId) setSelectedTaskId('');
-      return;
-    }
-    if (activeTab === 'log' && !visibleLogGroupKeys.length) {
-      if (selectedGroup) setSelectedGroup('');
-      if (selectedTaskId) setSelectedTaskId('');
-      return;
-    }
+    if (!keys.length) return;
     if (!kpiConfig[selectedGroup]) {
-      const first = activeTab === 'log' ? visibleLogGroupKeys[0] : keys[0];
-      if (!first) return;
+      const first = keys[0];
       setSelectedGroup(first);
-      const nextTasks = activeTab === 'log' ? getVisibleTasksForGroup(kpiConfig[first], logBrandMode) : (kpiConfig[first]?.tasks || []);
-      setSelectedTaskId(nextTasks[0]?.id || '');
+      setSelectedTaskId(kpiConfig[first]?.tasks[0]?.id || '');
       return;
     }
-    const taskIds = (
-      activeTab === 'log'
-        ? getVisibleTasksForGroup(kpiConfig[selectedGroup], logBrandMode)
-        : (kpiConfig[selectedGroup]?.tasks || [])
-    ).map(t => t.id);
+    const taskIds = (kpiConfig[selectedGroup]?.tasks || []).map(t => t.id);
     if (!taskIds.includes(selectedTaskId)) {
       setSelectedTaskId(taskIds[0] || '');
     }
-  }, [activeTab, kpiConfig, logBrandMode, selectedGroup, selectedTaskId, visibleLogGroupKeys]);
-
-  useEffect(() => {
-    if (activeTab !== 'log') return;
-    if (!visibleLogGroupKeys.length) {
-      if (selectedGroup) setSelectedGroup('');
-      if (selectedTaskId) setSelectedTaskId('');
-      return;
-    }
-    if (!visibleLogGroupKeys.includes(selectedGroup)) {
-      const firstVisible = visibleLogGroupKeys[0];
-      setSelectedGroup(firstVisible);
-      setSelectedTaskId(getVisibleTasksForGroup(kpiConfig[firstVisible], logBrandMode)[0]?.id || '');
-      return;
-    }
-    const visibleTaskIds = getVisibleTasksForGroup(kpiConfig[selectedGroup], logBrandMode).map((t) => t.id);
-    if (!visibleTaskIds.includes(selectedTaskId)) {
-      setSelectedTaskId(visibleTaskIds[0] || '');
-    }
-  }, [activeTab, kpiConfig, logBrandMode, selectedGroup, selectedTaskId, visibleLogGroupKeys]);
+  }, [kpiConfig, selectedGroup, selectedTaskId]);
 
   // ── Auth handlers
   const persistGoogleToken = (uid: string, token: string) => {
@@ -2142,28 +1956,10 @@ export default function App() {
     }
   };
 
-  const handleEmailSignIn = async (email: string, password: string) => {
-    try {
-      const methods = await fetchSignInMethodsForEmail(auth, email.trim());
-      if (!methods.includes('password')) {
-        showToast('❌ บัญชีนี้ต้องเข้า Google ก่อน แล้วตั้งรหัสผ่านใน Settings');
-        return;
-      }
-      await signInWithEmailAndPassword(auth, email.trim(), password);
-    } catch (e: unknown) {
-      const code = (e as { code?: string })?.code || '';
-      if (code === 'auth/invalid-credential' || code === 'auth/wrong-password') showToast('❌ อีเมลหรือรหัสผ่านไม่ถูกต้อง');
-      else if (code === 'auth/user-not-found') showToast('❌ ไม่พบบัญชีนี้ กรุณาเข้า Google ก่อน');
-      else showToast('❌ เข้าสู่ระบบไม่สำเร็จ');
-    }
-  };
-
   const handleSignOut = async () => {
     await signOut(auth);
     setEntries([]);
     setShowSettings(false);
-    setShowSwitchUserModal(false);
-    setActingAsUid(null);
     setGoogleAccessToken('');
     setGoogleAccessTokenExpiry(0);
     showToast('ออกจากระบบแล้ว');
@@ -2403,15 +2199,13 @@ export default function App() {
       let targetFolderId: string | undefined;
       const baseFolderId = driveFolderId.trim();
       if (baseFolderId) {
-          const token = await ensureDriveAccessToken();
-          if (token) {
-            const entryGroupId = mode === 'log' ? selectedGroup : (editEntry?.groupId || selectedGroup);
-            const grp          = kpiConfig[entryGroupId];
-            const entryTaskId  = mode === 'log' ? (currentTask?.id || selectedTaskId) : (editEntry?.taskId || selectedTaskId);
-            const entryTask    = grp?.tasks.find((task) => task.id === entryTaskId);
-            const entryDate    = mode === 'log' ? selectedDate : (editEntry?.date || getTodayStr());
-            const [y = '', m = ''] = entryDate.split('-');
-            const monthSub     = `${y}-${m}`;
+        const token = await ensureDriveAccessToken();
+        if (token) {
+          const entryGroupId = mode === 'log' ? selectedGroup : (editEntry?.groupId || selectedGroup);
+          const grp          = kpiConfig[entryGroupId];
+          const entryDate    = mode === 'log' ? selectedDate : (editEntry?.date || getTodayStr());
+          const [y = '', m = ''] = entryDate.split('-');
+          const monthSub     = `${y}-${m}`;
 
           let folderId = baseFolderId;
 
@@ -2421,7 +2215,7 @@ export default function App() {
           }
 
           // Level 2: Brand subfolder — only when group has exactly ONE brand (unambiguous)
-          const brands = getTaskBrands(entryTask, grp);
+          const brands = grp?.brands ?? [];
           if (brands.length === 1) {
             folderId = await getOrCreateDriveSubfolder(folderId, brands[0].toUpperCase(), token);
           }
@@ -2473,110 +2267,35 @@ export default function App() {
   };
 
   const handleSaveNickname = async (nextNickname: string): Promise<boolean> => {
-    if (!currentUser || !effectiveUid) return false;
+    if (!currentUser) return false;
     const cleaned = nextNickname.trim();
     if (!cleaned) {
       showToast('กรุณาใส่ชื่อเล่น');
       return false;
     }
-    const payload = effectiveUid === currentUser.uid
-      ? {
-          nickname: cleaned,
-          role: resolveRoleByEmail(currentUser.email),
-          isAdmin: isSuperAdminEmail(currentUser.email),
-          updatedAt: Date.now(),
-        }
-      : {
-          nickname: cleaned,
-          updatedAt: Date.now(),
-        };
-    await setDoc(doc(db, 'users', effectiveUid), payload, { merge: true });
+    await setDoc(doc(db, 'users', currentUser.uid), {
+      nickname: cleaned,
+      role: resolveRoleByEmail(currentUser.email),
+      isAdmin: isSuperAdminEmail(currentUser.email),
+      updatedAt: Date.now(),
+    }, { merge: true });
     setNicknameDraft(cleaned);
     setUserProfile((prev) => (prev ? { ...prev, nickname: cleaned } : prev));
-    if (effectiveUid === currentUser.uid) {
-      setViewerProfile((prev) => (prev ? { ...prev, nickname: cleaned } : prev));
-    }
     showToast('บันทึกชื่อเล่นแล้ว');
     return true;
   };
 
-  const handleSavePassword = async () => {
-    if (!currentUser || !currentUser.email) return;
-    const nextPassword = newPasswordDraft.trim();
-    if (nextPassword.length < 6) {
-      showToast('❌ รหัสผ่านต้องมีอย่างน้อย 6 ตัวอักษร');
-      return;
-    }
-    if (nextPassword !== confirmPasswordDraft.trim()) {
-      showToast('❌ รหัสผ่านใหม่ไม่ตรงกัน');
-      return;
-    }
-    if (hasPasswordLogin && !currentPasswordDraft.trim()) {
-      showToast('❌ กรุณาใส่รหัสผ่านปัจจุบัน');
-      return;
-    }
-
-    setPasswordSaving(true);
-    try {
-      if (hasPasswordLogin) {
-        const credential = EmailAuthProvider.credential(currentUser.email, currentPasswordDraft.trim());
-        await reauthenticateWithCredential(currentUser, credential);
-        await updatePassword(currentUser, nextPassword);
-        showToast('✅ เปลี่ยนรหัสผ่านแล้ว');
-      } else {
-        const credential = EmailAuthProvider.credential(currentUser.email, nextPassword);
-        await linkWithCredential(currentUser, credential);
-        showToast('✅ ตั้งรหัสผ่านสำหรับบัญชีนี้แล้ว');
-      }
-      setCurrentPasswordDraft('');
-      setNewPasswordDraft('');
-      setConfirmPasswordDraft('');
-    } catch (error) {
-      const code = (error as { code?: string })?.code || '';
-      if (code === 'auth/requires-recent-login') {
-        try {
-          await reauthenticateWithPopup(currentUser, googleProvider);
-          if (hasPasswordLogin) {
-            await updatePassword(currentUser, nextPassword);
-            showToast('✅ เปลี่ยนรหัสผ่านแล้ว');
-          } else {
-            const credential = EmailAuthProvider.credential(currentUser.email, nextPassword);
-            await linkWithCredential(currentUser, credential);
-            showToast('✅ ตั้งรหัสผ่านสำหรับบัญชีนี้แล้ว');
-          }
-          setCurrentPasswordDraft('');
-          setNewPasswordDraft('');
-          setConfirmPasswordDraft('');
-          return;
-        } catch (reauthError) {
-          console.error('Password reauth failed:', reauthError);
-          showToast('❌ ยืนยันตัวตนใหม่ไม่สำเร็จ');
-          return;
-        }
-      }
-      if (code === 'auth/provider-already-linked') showToast('บัญชีนี้มีรหัสผ่านแล้ว');
-      else if (code === 'auth/wrong-password' || code === 'auth/invalid-credential') showToast('❌ รหัสผ่านปัจจุบันไม่ถูกต้อง');
-      else if (code === 'auth/weak-password') showToast('❌ รหัสผ่านต้องมีอย่างน้อย 6 ตัวอักษร');
-      else showToast('❌ ตั้งค่ารหัสผ่านไม่สำเร็จ');
-    } finally {
-      setPasswordSaving(false);
-    }
-  };
-
   // ── KPI Config save — per user (stored by uid)
   const handleSaveKpiConfig = async (updated: WorkGroups, newTarget?: number) => {
-    if (!currentUser || !effectiveUid) return;
+    if (!currentUser) return;
     const target = Math.max(0, Number(newTarget ?? monthlyTarget) || 0);
-    const migratedUpdated = migrateWorkGroups(updated);
     // Immediately sync local state so UI updates without waiting for Firestore listener
-    setKpiConfig(migratedUpdated);
-    setLogBrandMode('all');
-    setSummaryBrandMode('all');
+    setKpiConfig(updated);
     if (newTarget !== undefined) setMonthlyTarget(target);
-    await setDoc(doc(db, 'kpiConfigs', effectiveUid), {
-      groups: migratedUpdated,
+    await setDoc(doc(db, 'kpiConfigs', currentUser.uid), {
+      groups: updated,
       monthlyTarget: target,
-      uid: effectiveUid,
+      uid: currentUser.uid,
       roleId: userProfile?.role || 'custom',
       policyVersion: KPI_POLICY_VERSION,
       updatedAt: Date.now(),
@@ -2632,115 +2351,55 @@ export default function App() {
     }
   };
 
-  const buildEntryWebhookPayload = (entry: WorkEntry, action: 'upsert_entry' | 'delete_entry'): SheetsWebhookPayload => {
-    const task = kpiConfig[entry.groupId]?.tasks.find((item) => item.id === entry.taskId);
-    const entryBrands = normalizeBrands(entry.brands || getTaskBrands(task, kpiConfig[entry.groupId]));
+  // ── Sheets Auto-Push (Apps Script friendly)
+  const pushToSheetsWebhook = (entry: WorkEntry) => {
+    if (!sheetsWebhookUrl) return;
+    const task = kpiConfig[entry.groupId]?.tasks.find(t => t.id === entry.taskId);
     const nickname = (userProfile?.nickname || displayName).trim();
-    const sheets = buildSheetNames(nickname, effectiveUid);
-    return {
-      action,
-      entry_id: entry.id,
-      date: entry.date,
-      name: entry.userName || displayName,
-      group: entry.groupName || kpiConfig[entry.groupId]?.name || entry.groupId,
-      taskId: entry.taskId,
-      taskName: entry.taskName || task?.name || '',
-      quantity: entry.quantity,
-      unit: entry.unit || task?.unit || '',
-      credits: entry.credits,
-      brands: entryBrands,
-      brand: getBrandLabel(entryBrands) || '',
-      notes: entry.notes,
+    const sheets = buildSheetNames(nickname, currentUser?.uid);
+    const payload: Record<string, unknown> = {
+      // New payload
+      date:      entry.date,
+      name:      entry.userName || displayName,
+      group:     kpiConfig[entry.groupId]?.name || entry.groupId,
+      taskId:    entry.taskId,
+      taskName:  task?.name || '',
+      quantity:  entry.quantity,
+      unit:      task?.unit || '',
+      credits:   entry.credits,
+      notes:     entry.notes,
       canvaLink: entry.canvaLink || '',
       driveLink: entry.driveLink || (entry.attachments?.[0]?.link ?? ''),
-      uid: effectiveUid,
-      email: normalizeEmail(userProfile?.email || currentUser?.email),
+      uid:       currentUser?.uid || '',
+      email:     normalizeEmail(currentUser?.email),
       nickname,
-      role: userProfile?.role || 'custom',
+      role:      userProfile?.role || 'custom',
       timestamp: new Date().toISOString(),
-      attachments: entry.attachments || [],
+      // Multi-file attachments (GAS v2)
+      attachments:      entry.attachments || [],
       attachmentsCount: entry.attachments?.length ?? 0,
-      attachmentsLinks: entry.attachments?.map((item) => item.link).join(' | ') ?? (entry.driveLink || ''),
-      attachmentsNames: entry.attachments?.map((item) => item.normalizedName).join(' | ') ?? '',
-      id: entry.id,
-      user: entry.userName || displayName,
-      groupName: entry.groupName || kpiConfig[entry.groupId]?.name || entry.groupId,
-      channel: entry.channel || task?.channel || '',
-      ownerKey: sheets.ownerKey,
-      masterSheetName: sheets.masterSheetName,
+      attachmentsLinks: entry.attachments?.map(a => a.link).join(' | ') ?? (entry.driveLink || ''),
+      attachmentsNames: entry.attachments?.map(a => a.normalizedName).join(' | ') ?? '',
+      // Backward-compatible fields (for legacy consumers)
+      id:        entry.id,
+      user:      entry.userName || displayName,
+      groupName: kpiConfig[entry.groupId]?.name || entry.groupId,
+      channel:   task?.channel || '',
+      ownerKey:  sheets.ownerKey,
+      masterSheetName:    sheets.masterSheetName,
       dashboardSheetName: sheets.dashboardSheetName,
     };
-  };
 
-  const postSheetsWebhook = async (payload: SheetsWebhookPayload): Promise<SheetsWebhookResponse> => {
-    if (!sheetsWebhookUrl) throw new Error('webhook_missing');
-    const body = JSON.stringify(payload);
-    const isAppsScriptWebhook = (() => {
-      try {
-        const hostname = new URL(sheetsWebhookUrl).hostname;
-        return hostname === 'script.google.com' || hostname === 'script.googleusercontent.com';
-      } catch {
-        return false;
-      }
-    })();
-
-    // Apps Script web apps execute the POST, then answer with a redirect that breaks fetch/CORS.
-    // Beacon transport skips response handling and reliably reaches the script in real browsers.
-    if (isAppsScriptWebhook && typeof navigator !== 'undefined' && typeof navigator.sendBeacon === 'function') {
-      const accepted = navigator.sendBeacon(
-        sheetsWebhookUrl,
-        new Blob([body], { type: 'text/plain;charset=utf-8' })
-      );
-      if (!accepted) throw new Error('webhook_beacon_failed');
-      return { ok: true, version: 'beacon' };
-    }
-
-    const response = await fetch(sheetsWebhookUrl, {
-      method: 'POST',
-      // Use a CORS-safelisted content type so browser requests avoid OPTIONS preflight.
-      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-      body,
-      keepalive: true,
-    });
-    let data: SheetsWebhookResponse | null = null;
-    try {
-      data = await response.json() as SheetsWebhookResponse;
-    } catch {
-      data = null;
-    }
-    if (!response.ok) {
-      throw new Error(data?.error || `webhook_http_${response.status}`);
-    }
-    if (!data?.ok) {
-      throw new Error(data?.error || 'webhook_rejected');
-    }
-    return data;
-  };
-
-  const dispatchSheetsWebhook = async (
-    payload: SheetsWebhookPayload,
-    options?: { queuedMessage?: string; successMessage?: string; failureMessage?: string; queueOnFailure?: boolean }
-  ) => {
-    if (!sheetsWebhookUrl) return false;
     if (!isOnline) {
       enqueueWebhook(payload);
-      showToast(options?.queuedMessage || 'บันทึกแล้ว (คิวส่งชีตหลังออนไลน์)');
-      return false;
+      showToast('บันทึกแล้ว (คิวส่งชีตหลังออนไลน์)');
+      return;
     }
-    try {
-      await postSheetsWebhook(payload);
-      if (options?.successMessage) showToast(options.successMessage);
-      return true;
-    } catch (error) {
-      console.error('Sheets webhook error:', error);
-      if (options?.queueOnFailure !== false) {
-        enqueueWebhook(payload);
-        showToast(options?.failureMessage || 'บันทึกแล้ว (ส่งชีตไม่สำเร็จ, เข้า Queue)');
-      } else {
-        showToast(options?.failureMessage || 'ส่งข้อมูลไปชีตไม่สำเร็จ');
-      }
-      return false;
-    }
+
+    void postSheetsWebhook(payload).catch(() => {
+      enqueueWebhook(payload);
+      showToast('บันทึกแล้ว (ส่งชีตไม่สำเร็จ, เข้า Queue)');
+    });
   };
 
   useEffect(() => {
@@ -2752,7 +2411,8 @@ export default function App() {
       const remaining: Record<string, unknown>[] = [];
       for (const payload of queue) {
         try {
-          await postSheetsWebhook(payload as SheetsWebhookPayload);
+          const ok = await postSheetsWebhook(payload);
+          if (!ok) remaining.push(payload);
         } catch {
           remaining.push(payload);
         }
@@ -2765,8 +2425,11 @@ export default function App() {
     void flush();
   }, [currentUser, sheetsWebhookUrl, isOnline]);
 
-  const logBrandModeLabel = logBrandMode === 'all' ? 'All' : logBrandMode.toUpperCase();
-  const summaryBrandModeLabel = summaryBrandMode === 'all' ? 'All' : summaryBrandMode.toUpperCase();
+  // ── Ordered group keys — always sorted alphabetically (A → B → C → D)
+  const orderedGroupKeys = useMemo(
+    () => Object.keys(kpiConfig).sort(),
+    [kpiConfig]
+  );
 
   // ── Admin: delete user data from Firestore + notify webhook
   const handleDeleteAdminUser = async (uid: string, nickname: string) => {
@@ -2780,20 +2443,12 @@ export default function App() {
       await deleteDoc(doc(db, 'kpiConfigs', uid));
       // 3. ลบ user profile doc
       await deleteDoc(doc(db, 'users', uid));
-      if (actingAsUid === uid) setActingAsUid(null);
+      // 4. Fire webhook notification
       if (sheetsWebhookUrl) {
-        await dispatchSheetsWebhook(
-          {
-            action: 'delete_user',
-            uid,
-            nickname,
-            timestamp: new Date().toISOString(),
-          },
-          {
-            successMessage: '',
-            failureMessage: 'ลบผู้ใช้แล้ว แต่แจ้งชีตไม่สำเร็จ (เข้า Queue)',
-          }
-        );
+        void postSheetsWebhook({
+          action: 'delete_user', uid, nickname,
+          timestamp: new Date().toISOString(),
+        }).catch(() => {});
       }
       showToast(`ลบผู้ใช้ "${nickname}" แล้ว ✓`);
     } catch (err) {
@@ -2803,19 +2458,229 @@ export default function App() {
 
   // ── Derived state
   const currentTask = useMemo(() => {
-    const fallbackGroupKey = visibleLogGroupKeys[0] || orderedGroupKeys[0];
-    const group = kpiConfig[selectedGroup] || (fallbackGroupKey ? kpiConfig[fallbackGroupKey] : undefined);
-    if (!group) return undefined;
-    const visibleTasks = getVisibleTasksForGroup(group, logBrandMode);
-    return visibleTasks.find((t) => t.id === selectedTaskId) || visibleTasks[0] || group.tasks[0];
-  }, [kpiConfig, logBrandMode, orderedGroupKeys, selectedGroup, selectedTaskId, visibleLogGroupKeys]);
+    const group = kpiConfig[selectedGroup];
+    if (!group) return (Object.values(kpiConfig) as WorkGroup[])[0]?.tasks[0];
+    return group.tasks.find((t) => t.id === selectedTaskId) || group.tasks[0];
+  }, [kpiConfig, selectedGroup, selectedTaskId]);
 
   const displayName =
     userProfile?.nickname?.trim() ||
-    userProfile?.displayName ||
-    (effectiveUid === currentUser?.uid ? currentUser?.displayName : '') ||
-    userProfile?.email?.split('@')[0] ||
+    currentUser?.displayName ||
+    currentUser?.email?.split('@')[0] ||
     'User';
+
+  const updateDailyListItem = (
+    setter: React.Dispatch<React.SetStateAction<string[]>>,
+    index: number,
+    value: string
+  ) => {
+    setter((prev) => {
+      const next = [...prev];
+      next[index] = value;
+      return next;
+    });
+  };
+
+  const addDailyListItem = (setter: React.Dispatch<React.SetStateAction<string[]>>) => {
+    setter((prev) => [...prev, '']);
+  };
+
+  const removeDailyListItem = (
+    setter: React.Dispatch<React.SetStateAction<string[]>>,
+    index: number
+  ) => {
+    setter((prev) => (prev.length <= 1 ? [''] : prev.filter((_, i) => i !== index)));
+  };
+
+  const dailyEntriesForDate = useMemo(
+    () => entries
+      .filter((entry) => entry.user === currentUser?.uid && entry.date === dailyDate)
+      .sort((a, b) => Number(a.createdAt || 0) - Number(b.createdAt || 0)),
+    [entries, currentUser, dailyDate]
+  );
+
+  const autoEveningRoutineItems = useMemo(() => {
+    const seen = new Set<string>();
+    const next: string[] = [];
+    for (const entry of dailyEntriesForDate) {
+      const group = kpiConfig[entry.groupId];
+      const task = group?.tasks.find((item) => item.id === entry.taskId);
+      const taskName = entry.taskName || task?.name || entry.taskId;
+      if (!taskName || seen.has(taskName)) continue;
+      seen.add(taskName);
+      next.push(taskName);
+    }
+    return next;
+  }, [dailyEntriesForDate, kpiConfig]);
+
+  const autoEveningResultItems = useMemo(
+    () => dailyEntriesForDate.map((entry) => {
+      const group = kpiConfig[entry.groupId];
+      const task = group?.tasks.find((item) => item.id === entry.taskId);
+      const taskName = entry.taskName || task?.name || entry.taskId;
+      const unit = entry.unit || task?.unit || '';
+      const qtyText = `${entry.quantity}${unit ? ` ${unit}` : ''}`;
+      const noteText = entry.notes?.trim() ? ` · ${entry.notes.trim()}` : '';
+      return `${taskName} — ${qtyText} = ${entry.credits} Cr${noteText}`;
+    }),
+    [dailyEntriesForDate, kpiConfig]
+  );
+
+  const activeMorningReport = useMemo(
+    () => dailyReports.find((report) => report.date === dailyDate && report.type === 'morning'),
+    [dailyReports, dailyDate]
+  );
+
+  const activeEveningReport = useMemo(
+    () => dailyReports.find((report) => report.date === dailyDate && report.type === 'evening'),
+    [dailyReports, dailyDate]
+  );
+
+  useEffect(() => {
+    if (activeMorningReport) {
+      setMorningCheckInTime(activeMorningReport.checkInTime || (dailyDate === getTodayStr() ? getCurrentTimeHM() : ''));
+      setMorningFocusItems(activeMorningReport.focusItems.length ? activeMorningReport.focusItems : ['']);
+      return;
+    }
+    setMorningCheckInTime(dailyDate === getTodayStr() ? getCurrentTimeHM() : '');
+    setMorningFocusItems(['']);
+  }, [activeMorningReport, dailyDate]);
+
+  useEffect(() => {
+    if (activeEveningReport) {
+      setEveningRoutineItems(activeEveningReport.routineItems.length ? activeEveningReport.routineItems : ['']);
+      setEveningResultItems(activeEveningReport.resultItems.length ? activeEveningReport.resultItems : ['']);
+      setEveningNextMoveItems(activeEveningReport.nextMoveItems.length ? activeEveningReport.nextMoveItems : ['']);
+      setDailyIssues(activeEveningReport.issues || '');
+      setDailyIssueStatus(activeEveningReport.issueStatus || 'resolved');
+      setDailyIssueDetail(activeEveningReport.issueDetail || '');
+      setDailyIssueNextStep(activeEveningReport.issueNextStep || '');
+      return;
+    }
+    setEveningRoutineItems(autoEveningRoutineItems.length ? autoEveningRoutineItems : ['']);
+    setEveningResultItems(autoEveningResultItems.length ? autoEveningResultItems : ['']);
+    setEveningNextMoveItems(['']);
+    setDailyIssues('');
+    setDailyIssueStatus('resolved');
+    setDailyIssueDetail('');
+    setDailyIssueNextStep('');
+  }, [activeEveningReport, autoEveningRoutineItems, autoEveningResultItems]);
+
+  useEffect(() => {
+    setDailyCopySuccess(false);
+  }, [dailyDate, dailyTab]);
+
+  const morningPreviewText = useMemo(
+    () => buildMorningReportText({
+      nickname: displayName,
+      date: dailyDate,
+      gender: reportGender,
+      checkInTime: morningCheckInTime,
+      focusItems: morningFocusItems,
+      focusEmoji: reportEmojis.focus,
+    }),
+    [displayName, dailyDate, reportGender, morningCheckInTime, morningFocusItems, reportEmojis.focus]
+  );
+
+  const eveningPreviewText = useMemo(
+    () => buildEveningReportText({
+      nickname: displayName,
+      date: dailyDate,
+      gender: reportGender,
+      routineItems: eveningRoutineItems,
+      resultItems: eveningResultItems,
+      nextMoveItems: eveningNextMoveItems,
+      issues: dailyIssues,
+      issueStatus: dailyIssueStatus,
+      issueDetail: dailyIssueDetail,
+      issueNextStep: dailyIssueNextStep,
+      routineEmoji: reportEmojis.routine,
+      resultsEmoji: reportEmojis.results,
+      nextMoveEmoji: reportEmojis.nextMove,
+      issuesEmoji: reportEmojis.issues,
+    }),
+    [displayName, dailyDate, reportGender, eveningRoutineItems, eveningResultItems, eveningNextMoveItems, dailyIssues, dailyIssueStatus, dailyIssueDetail, dailyIssueNextStep, reportEmojis.routine, reportEmojis.results, reportEmojis.nextMove, reportEmojis.issues]
+  );
+
+  const copyDailyText = async (text: string) => {
+    await navigator.clipboard.writeText(text);
+    setDailyCopySuccess(true);
+    window.setTimeout(() => setDailyCopySuccess(false), 2000);
+  };
+
+  const saveAndCopyDailyReport = async (type: DailyReportType) => {
+    if (!currentUser) return;
+    const now = Date.now();
+    const reportId = `${dailyDate}_${type}`;
+    const existing = type === 'morning' ? activeMorningReport : activeEveningReport;
+    const generatedText = type === 'morning' ? morningPreviewText : eveningPreviewText;
+    const nextReport: DailyReport = {
+      id: reportId,
+      type,
+      date: dailyDate,
+      uid: currentUser.uid,
+      email: normalizeEmail(currentUser.email),
+      nickname: displayName,
+      gender: reportGender,
+      checkInTime: type === 'morning' ? morningCheckInTime : '',
+      focusItems: type === 'morning' ? sanitizeList(morningFocusItems) : [],
+      routineItems: type === 'evening' ? sanitizeList(eveningRoutineItems) : [],
+      resultItems: type === 'evening' ? sanitizeList(eveningResultItems) : [],
+      nextMoveItems: type === 'evening' ? sanitizeList(eveningNextMoveItems) : [],
+      issues: type === 'evening' ? dailyIssues.trim() : '',
+      issueStatus: type === 'evening' ? dailyIssueStatus : 'resolved',
+      issueDetail: type === 'evening' ? dailyIssueDetail.trim() : '',
+      issueNextStep: type === 'evening' ? dailyIssueNextStep.trim() : '',
+      sourceEntryIds: type === 'evening' ? dailyEntriesForDate.map((entry) => entry.id) : [],
+      generatedText,
+      createdAt: existing?.createdAt || now,
+      updatedAt: now,
+      lastCopiedAt: existing?.lastCopiedAt,
+    };
+
+    setDailySaving(true);
+    let saved = false;
+    try {
+      await setDoc(doc(db, 'users', currentUser.uid, 'dailyReports', reportId), nextReport, { merge: true });
+      saved = true;
+    } catch (error) {
+      console.error('Daily report save:', error);
+    }
+
+    try {
+      await copyDailyText(generatedText);
+      if (saved) {
+        await setDoc(doc(db, 'users', currentUser.uid, 'dailyReports', reportId), {
+          generatedText,
+          lastCopiedAt: Date.now(),
+          updatedAt: Date.now(),
+        }, { merge: true });
+        showToast('✅ บันทึกและคัดลอก Daily Report แล้ว');
+      } else {
+        showToast('⚠️ คัดลอกแล้ว แต่ยังบันทึก history ไม่สำเร็จ');
+      }
+    } catch (error) {
+      console.error('Daily report copy:', error);
+      showToast(saved ? '❌ บันทึกรายงานแล้ว แต่คัดลอกไม่สำเร็จ' : '❌ คัดลอกไม่สำเร็จ และ history ยังไม่ถูกบันทึก');
+    } finally {
+      setDailySaving(false);
+    }
+  };
+
+  const handleCopyDailyHistory = async (report: DailyReport) => {
+    if (!currentUser) return;
+    try {
+      await copyDailyText(report.generatedText);
+      await setDoc(doc(db, 'users', currentUser.uid, 'dailyReports', report.id), {
+        lastCopiedAt: Date.now(),
+        updatedAt: Date.now(),
+      }, { merge: true });
+      showToast('คัดลอก Daily Report แล้ว ✓');
+    } catch (error) {
+      console.error('Daily history copy:', error);
+      showToast('❌ คัดลอกไม่สำเร็จ');
+    }
+  };
 
   const runtimeProjectId = String(firebaseApp.options.projectId || '');
   const runtimeAuthDomain = String(firebaseApp.options.authDomain || '');
@@ -2826,8 +2691,8 @@ export default function App() {
   const exportYearOptions = useMemo(() => {
     const years = new Set<number>([new Date().getFullYear()]);
     entries.forEach((entry) => {
-      const year = parseDateParts(entry.date)?.year;
-      if (year !== undefined) years.add(year);
+      const year = new Date(entry.date).getFullYear();
+      if (!Number.isNaN(year)) years.add(year);
     });
     return Array.from(years).sort((a, b) => b - a);
   }, [entries]);
@@ -2835,31 +2700,34 @@ export default function App() {
   // ── Header stats — always current month
   const stats = useMemo(() => {
     const now = new Date();
-    const monthEntries = entries.filter((e) => {
-      const parts = parseDateParts(e.date);
-      return parts?.monthIndex === now.getMonth() && parts?.year === now.getFullYear();
+    const uid = currentUser?.uid;
+    const userEntries = entries.filter((e) => e.user === uid);
+    const monthEntries = userEntries.filter((e) => {
+      try {
+        const d = new Date(e.date);
+        return d.getMonth() === now.getMonth() && d.getFullYear() === now.getFullYear();
+      } catch { return false; }
     });
-    const todayEntries = entries.filter((e) => e.date === getTodayStr());
+    const todayEntries = userEntries.filter((e) => e.date === getTodayStr());
     const monthCredits = monthEntries.reduce((s, e) => s + e.credits, 0);
     return {
       monthTotal:  monthCredits,
       todayTotal:  todayEntries.reduce((s, e) => s + e.credits, 0),
       percent:     safePercent(monthCredits, monthlyTarget),
     };
-  }, [entries, monthlyTarget]);
+  }, [entries, currentUser, monthlyTarget]);
 
   // ── Summary tab data
   const summaryData = useMemo(() => {
-    const monthEntries = entries.filter((e) => {
-      const parts = parseDateParts(e.date);
-      return parts?.monthIndex === summaryMonth && parts?.year === summaryYear;
+    const uid = currentUser?.uid;
+    const userEntries = entries.filter((e) => e.user === uid);
+    const monthEntries = userEntries.filter((e) => {
+      try {
+        const d = new Date(e.date);
+        return d.getMonth() === summaryMonth && d.getFullYear() === summaryYear;
+      } catch { return false; }
     });
-    const filteredEntries = monthEntries.filter((entry) => {
-      const group = kpiConfig[entry.groupId];
-      const task = group?.tasks.find((item) => item.id === entry.taskId);
-      return matchesBrandMode(getEntryBrands(entry, group, task), summaryBrandMode);
-    });
-    const totalCredits   = filteredEntries.reduce((s, e) => s + e.credits, 0);
+    const totalCredits   = monthEntries.reduce((s, e) => s + e.credits, 0);
     const isTargetSet    = monthlyTarget > 0;
     const percent        = safePercent(totalCredits, monthlyTarget);
 
@@ -2867,10 +2735,10 @@ export default function App() {
       .sort((a, b) => a.localeCompare(b))
       .map((key) => ({
         key,
-        name:    filteredEntries.find((e) => e.groupId === key)?.groupName || kpiConfig[key].name,
+        name:    kpiConfig[key].name,
         color:   kpiConfig[key].color,
         bg:      kpiConfig[key].bg,
-        credits: filteredEntries.filter((e) => e.groupId === key).reduce((s, e) => s + e.credits, 0),
+        credits: monthEntries.filter((e) => e.groupId === key).reduce((s, e) => s + e.credits, 0),
       }))
       .filter((g) => g.credits > 0);
 
@@ -2886,9 +2754,9 @@ export default function App() {
     return {
       totalCredits, percent, groups, maxGroupCredits, isCurrentMonth,
       remainingDays, remainingCredits, dailyNeeded, isComplete, isTargetSet,
-      monthName: getMonthNameThai(summaryMonth), entryCount: filteredEntries.length,
+      monthName: getMonthNameThai(summaryMonth), entryCount: monthEntries.length,
     };
-  }, [entries, summaryMonth, summaryYear, kpiConfig, monthlyTarget, summaryBrandMode]);
+  }, [entries, currentUser, summaryMonth, summaryYear, kpiConfig, monthlyTarget]);
 
   const navSummaryMonth = (dir: -1 | 1) => {
     const next = summaryMonth + dir;
@@ -2903,8 +2771,12 @@ export default function App() {
     const now = new Date();
     const profileByUid = new Map<string, UserProfile>(adminProfiles.map((p) => [p.uid, p]));
     const monthEntries = adminEntries.filter((e) => {
-      const parts = parseDateParts(e.date);
-      return parts?.monthIndex === now.getMonth() && parts?.year === now.getFullYear();
+      try {
+        const d = new Date(e.date);
+        return d.getMonth() === now.getMonth() && d.getFullYear() === now.getFullYear();
+      } catch {
+        return false;
+      }
     });
 
     const byUser = monthEntries.reduce<Record<string, { credits: number; count: number }>>((acc, entry) => {
@@ -2941,27 +2813,18 @@ export default function App() {
 
   // ── CRUD handlers
   const handleAddEntry = async () => {
-    if (!currentUser || !currentTask || !effectiveUid) return;
-    const currentGroup = kpiConfig[selectedGroup];
-    const currentBrands = getTaskBrands(currentTask, currentGroup);
+    if (!currentUser || !currentTask) return;
     const id = crypto.randomUUID ? crypto.randomUUID() : Math.random().toString(36).substr(2, 9);
     const newEntry: WorkEntry = {
       id,
       date:      selectedDate,
-      user:      effectiveUid,
+      user:      currentUser.uid,
       userName:  displayName,
-      role:      userProfile?.role || 'custom',
       groupId:   selectedGroup,
-      groupName: currentGroup?.name || selectedGroup,
       taskId:    selectedTaskId,
-      taskName:  currentTask.name,
       quantity,
-      unit:      currentTask.unit,
-      creditPerUnit: currentTask.creditPerUnit,
-      brands:    currentBrands,
       credits:   quantity * currentTask.creditPerUnit,
       notes,
-      channel:   currentTask.channel,
       createdAt: Date.now(),
       ...(canvaLink.trim() ? { canvaLink: canvaLink.trim() } : {}),
       ...(driveLink.trim() || logAttachments[0]?.link
@@ -2972,7 +2835,7 @@ export default function App() {
     };
     setIsLoading(true);
     try {
-      await setDoc(doc(db, 'users', effectiveUid, 'entries', id), newEntry);
+      await setDoc(doc(db, 'users', currentUser.uid, 'entries', id), newEntry);
       showToast(`บันทึกแล้ว +${newEntry.credits} Cr.`);
       setQuantity(1);
       setNotes('');
@@ -2980,10 +2843,7 @@ export default function App() {
       setDriveLink('');
       setLogAttachments([]);
       setPendingLocalFiles([]);
-      void dispatchSheetsWebhook(
-        buildEntryWebhookPayload(newEntry, 'upsert_entry'),
-        { failureMessage: 'บันทึกแล้ว (ส่งชีตไม่สำเร็จ, เข้า Queue)' }
-      );
+      pushToSheetsWebhook(newEntry);
     } catch (e) {
       console.error(e);
       showToast('❌ บันทึกไม่สำเร็จ');
@@ -2993,31 +2853,15 @@ export default function App() {
   };
 
   const handleUpdateEntry = async () => {
-    if (!editEntry || !currentUser || !effectiveUid) return;
-    const group = kpiConfig[editEntry.groupId];
-    const task = group?.tasks.find((t) => t.id === editEntry.taskId);
+    if (!editEntry || !currentUser) return;
+    const task = kpiConfig[editEntry.groupId]?.tasks.find((t) => t.id === editEntry.taskId);
     if (!task) return;
-    const updated = {
-      ...editEntry,
-      groupName: group?.name || editEntry.groupName || editEntry.groupId,
-      taskName: task.name,
-      unit: task.unit,
-      creditPerUnit: task.creditPerUnit,
-      brands: getTaskBrands(task, group),
-      channel: task.channel,
-      credits: editEntry.quantity * task.creditPerUnit,
-    };
+    const updated = { ...editEntry, credits: editEntry.quantity * task.creditPerUnit };
     setIsLoading(true);
     try {
-      await setDoc(doc(db, 'users', effectiveUid, 'entries', updated.id), updated);
-      void dispatchSheetsWebhook(
-        buildEntryWebhookPayload(updated, 'upsert_entry'),
-        {
-          successMessage: 'อัปเดตแล้ว',
-          failureMessage: 'อัปเดตแล้ว แต่ส่งชีตไม่สำเร็จ (เข้า Queue)',
-        }
-      );
+      await setDoc(doc(db, 'users', currentUser.uid, 'entries', updated.id), updated);
       setEditEntry(null);
+      showToast('อัปเดตแล้ว');
     } catch (e) {
       console.error(e);
       showToast('❌ อัปเดตไม่สำเร็จ');
@@ -3027,23 +2871,12 @@ export default function App() {
   };
 
   const handleDelete = async (id: string) => {
-    if (!currentUser || !effectiveUid) return;
-    const targetEntry = entries.find((entry) => entry.id === id);
+    if (!currentUser) return;
     setIsLoading(true);
     try {
-      await deleteDoc(doc(db, 'users', effectiveUid, 'entries', id));
-      if (targetEntry) {
-        void dispatchSheetsWebhook(
-          buildEntryWebhookPayload(targetEntry, 'delete_entry'),
-          {
-            successMessage: 'ลบเรียบร้อย',
-            failureMessage: 'ลบแล้ว แต่ส่งชีตไม่สำเร็จ (เข้า Queue)',
-          }
-        );
-      } else {
-        showToast('ลบเรียบร้อย');
-      }
+      await deleteDoc(doc(db, 'users', currentUser.uid, 'entries', id));
       setDeleteId(null);
+      showToast('ลบเรียบร้อย');
     } catch (e) {
       console.error(e);
       showToast('❌ ลบไม่สำเร็จ');
@@ -3052,377 +2885,27 @@ export default function App() {
     }
   };
 
-  const parseSpreadsheetIdFromUrl = (url: string) => {
-    const trimmed = url.trim();
-    if (!trimmed) return '';
-    const match = trimmed.match(/\/spreadsheets\/d\/([a-zA-Z0-9-_]+)/);
-    return match?.[1] || trimmed;
-  };
-
-  const getSheetCell = (row: Array<string | number>, index: number) => String(row[index] ?? '').trim();
-
-  const isDebugAllEntriesRow = (row: Array<string | number>) => {
-    const uid = getSheetCell(row, 2);
-    const nickname = getSheetCell(row, 4);
-    const entryId = getSheetCell(row, 18);
-    return (
-      DEBUG_UIDS.has(uid) ||
-      DEBUG_ENTRY_IDS.has(entryId) ||
-      DEBUG_NICKNAMES.has(nickname) ||
-      (!uid && nickname === 'user_')
-    );
-  };
-
-  const isDebugUserRegistryRow = (row: Array<string | number>) => {
-    const uid = getSheetCell(row, 0);
-    const nickname = getSheetCell(row, 2);
-    const kpiSheet = getSheetCell(row, 4);
-    return (
-      DEBUG_UIDS.has(uid) ||
-      DEBUG_NICKNAMES.has(nickname) ||
-      DEBUG_KPI_SHEETS.has(kpiSheet) ||
-      (!uid && nickname === 'user_')
-    );
-  };
-
-  const compareRowsByTimestamp = (a: Array<string | number>, b: Array<string | number>, nicknameIndex: number, entryIdIndex: number) => {
-    const dateCompare = getSheetCell(a, 1).localeCompare(getSheetCell(b, 1));
-    if (dateCompare !== 0) return dateCompare;
-    const timestampCompare = getSheetCell(a, 0).localeCompare(getSheetCell(b, 0));
-    if (timestampCompare !== 0) return timestampCompare;
-    const nicknameCompare = getSheetCell(a, nicknameIndex).localeCompare(getSheetCell(b, nicknameIndex));
-    if (nicknameCompare !== 0) return nicknameCompare;
-    return getSheetCell(a, entryIdIndex).localeCompare(getSheetCell(b, entryIdIndex));
-  };
-
-  const compareRegistryRows = (a: Array<string | number>, b: Array<string | number>) => {
-    const nicknameCompare = getSheetCell(a, 2).localeCompare(getSheetCell(b, 2));
-    if (nicknameCompare !== 0) return nicknameCompare;
-    return getSheetCell(a, 0).localeCompare(getSheetCell(b, 0));
-  };
-
-  const sheetsApiRequest = async <T,>(token: string, url: string, init?: RequestInit): Promise<T> => {
-    const response = await fetch(url, {
-      ...init,
-      headers: {
-        Authorization: `Bearer ${token}`,
-        ...(init?.headers || {}),
-      },
-    });
-    if (!response.ok) {
-      const text = await response.text().catch(() => '');
-      throw new Error(text || `sheets_http_${response.status}`);
-    }
-    if (response.status === 204) return {} as T;
-    return await response.json() as T;
-  };
-
-  const getSpreadsheetMeta = async (token: string, spreadsheetId: string) => {
-    return await sheetsApiRequest<{
-      sheets?: Array<{ properties?: { sheetId?: number; title?: string } }>;
-    }>(
-      token,
-      `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}?fields=sheets.properties(sheetId,title)`
-    );
-  };
-
-  const getSheetValues = async (token: string, spreadsheetId: string, range: string) => {
-    const data = await sheetsApiRequest<{ values?: Array<Array<string | number>> }>(
-      token,
-      `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/${encodeURIComponent(range)}`
-    );
-    return data.values || [];
-  };
-
-  const clearSheetValues = async (token: string, spreadsheetId: string, range: string) => {
-    await sheetsApiRequest(
-      token,
-      `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/${encodeURIComponent(range)}:clear`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: '{}',
-      }
-    );
-  };
-
-  const updateSheetValues = async (
-    token: string,
-    spreadsheetId: string,
-    range: string,
-    values: Array<Array<string | number>>
-  ) => {
-    await sheetsApiRequest(
-      token,
-      `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/${encodeURIComponent(range)}?valueInputOption=RAW`,
-      {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ range, majorDimension: 'ROWS', values }),
-      }
-    );
-  };
-
-  const batchUpdateSpreadsheet = async (
-    token: string,
-    spreadsheetId: string,
-    requests: Record<string, unknown>[]
-  ) => {
-    if (!requests.length) return { replies: [] as Array<Record<string, unknown>> };
-    return await sheetsApiRequest<{ replies?: Array<Record<string, unknown>> }>(
-      token,
-      `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}:batchUpdate`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ requests }),
-      }
-    );
-  };
-
-  const ensureSheetExists = async (token: string, spreadsheetId: string, title: string) => {
-    const meta = await getSpreadsheetMeta(token, spreadsheetId);
-    const existing = meta.sheets?.find((sheet) => sheet.properties?.title === title)?.properties?.sheetId;
-    if (existing) return existing;
-    const result = await batchUpdateSpreadsheet(token, spreadsheetId, [
-      { addSheet: { properties: { title } } },
-    ]);
-    const createdId = result.replies?.[0]?.addSheet?.properties?.sheetId;
-    if (typeof createdId !== 'number') throw new Error(`create_sheet_failed:${title}`);
-    return createdId;
-  };
-
-  const handleBackfillGiftToSheet = async () => {
-    if (!isSuperAdmin) return;
-    const spreadsheetId = parseSpreadsheetIdFromUrl(sheetUrl);
-    if (!spreadsheetId) {
-      showToast('ใส่ Google Sheet URL ก่อน');
-      return;
-    }
-
-    const token = await ensureDriveAccessToken();
-    if (!token) return;
-
-    setGiftBackfillBusy(true);
-    setGiftBackfillStatus('กำลังโหลดข้อมูล Gift...');
-
-    try {
-      const [giftProfileSnap, giftKpiSnap, giftEntriesSnap] = await Promise.all([
-        getDoc(doc(db, 'users', GIFT_UID)),
-        getDoc(doc(db, 'kpiConfigs', GIFT_UID)),
-        getDocs(query(collection(db, 'users', GIFT_UID, 'entries'), orderBy('createdAt', 'asc'))),
-      ]);
-
-      const storedProfile = giftProfileSnap.exists() ? (giftProfileSnap.data() as UserProfile) : null;
-      const giftProfile: UserProfile = {
-        uid: GIFT_UID,
-        displayName: storedProfile?.displayName || 'Young Age',
-        nickname: storedProfile?.nickname || 'Gift',
-        email: normalizeEmail(storedProfile?.email || HOST_EMAIL),
-        photoURL: storedProfile?.photoURL || '',
-        role: resolveRoleByEmail(storedProfile?.email || HOST_EMAIL),
-        isAdmin: false,
-        createdAt: storedProfile?.createdAt || Date.now(),
-        updatedAt: storedProfile?.updatedAt || Date.now(),
-        customTitle: storedProfile?.customTitle,
-        settings: storedProfile?.settings,
-      };
-
-      const giftGroups = giftKpiSnap.exists() && giftKpiSnap.data()?.groups
-        ? migrateWorkGroups(giftKpiSnap.data()?.groups as WorkGroups)
-        : getInitialKpiForEmail(giftProfile.email).groups;
-      const giftEntries = giftEntriesSnap.docs.map((entryDoc) => ({ ...entryDoc.data() } as WorkEntry));
-      const giftNickname = (giftProfile.nickname || 'Gift').trim() || 'Gift';
-      const giftKpiSheetName = `${sheetSafe(giftNickname, 'Gift')}_KPI`;
-
-      setGiftBackfillStatus(`พบ ${giftEntries.length} รายการของ Gift · กำลังเตรียมข้อมูล...`);
-
-      const buildGiftRows = () => {
-        let unmatched = 0;
-        let firstSeen = Number.MAX_SAFE_INTEGER;
-        let lastSeen = 0;
-
-        const allRows = giftEntries.map((entry) => {
-          const group = giftGroups[entry.groupId];
-          const task = group?.tasks.find((item) => item.id === entry.taskId);
-          const groupName = entry.groupName || group?.label || group?.name || entry.groupId;
-          const taskName = entry.taskName || task?.name || entry.taskId;
-          const unit = entry.unit || task?.unit || '';
-          if (!group || !task) unmatched += 1;
-
-          const createdAt = Number(entry.createdAt || Date.now());
-          firstSeen = Math.min(firstSeen, createdAt);
-          lastSeen = Math.max(lastSeen, createdAt);
-          const timestamp = Number.isFinite(createdAt) ? new Date(createdAt).toISOString() : new Date().toISOString();
-          const attachments = entry.attachments || [];
-          const attachmentsCount = attachments.length;
-          const attachmentsLinks = attachments.map((item) => item.link).join(' | ') || (entry.driveLink || '');
-          const attachmentsNames = attachments.map((item) => item.normalizedName).join(' | ');
-          const driveLinkValue = entry.driveLink || attachments[0]?.link || '';
-
-          const masterRow: Array<string | number> = [
-            timestamp,
-            entry.date || '',
-            GIFT_UID,
-            giftProfile.email,
-            giftNickname,
-            String(giftProfile.role || 'graphic_designer'),
-            groupName,
-            entry.taskId || '',
-            taskName,
-            Number(entry.quantity || 0),
-            unit,
-            Number(entry.credits || 0),
-            entry.notes || '',
-            entry.canvaLink || '',
-            driveLinkValue,
-            attachmentsCount,
-            attachmentsLinks,
-            attachmentsNames,
-            entry.id,
-          ];
-
-          const kpiRow: Array<string | number> = [
-            timestamp,
-            entry.date || '',
-            groupName,
-            entry.taskId || '',
-            taskName,
-            Number(entry.quantity || 0),
-            unit,
-            Number(entry.credits || 0),
-            entry.notes || '',
-            entry.canvaLink || '',
-            driveLinkValue,
-            attachmentsCount,
-            attachmentsLinks,
-            attachmentsNames,
-            entry.id,
-          ];
-
-          return { masterRow, kpiRow };
-        });
-
-        const firstSeenIso = Number.isFinite(firstSeen) ? new Date(firstSeen).toISOString() : new Date().toISOString();
-        const lastSeenIso = lastSeen > 0 ? new Date(lastSeen).toISOString() : firstSeenIso;
-        return { allRows, unmatched, firstSeenIso, lastSeenIso };
-      };
-
-      const { allRows: giftRows, unmatched, firstSeenIso, lastSeenIso } = buildGiftRows();
-      const giftMasterRows = giftRows.map((row) => row.masterRow);
-      const giftKpiRows = giftRows.map((row) => row.kpiRow);
-
-      setGiftBackfillStatus('กำลังเช็กโครงสร้าง Google Sheet...');
-
-      const existingMeta = await getSpreadsheetMeta(token, spreadsheetId);
-      const debugTabs = (existingMeta.sheets || [])
-        .filter((sheet) => DEBUG_KPI_SHEETS.has(sheet.properties?.title || ''))
-        .map((sheet) => sheet.properties?.sheetId)
-        .filter((sheetId): sheetId is number => typeof sheetId === 'number');
-
-      if (debugTabs.length) {
-        await batchUpdateSpreadsheet(
-          token,
-          spreadsheetId,
-          debugTabs.map((sheetId) => ({ deleteSheet: { sheetId } }))
-        );
-      }
-
-      await ensureSheetExists(token, spreadsheetId, giftKpiSheetName);
-
-      const [allEntriesValues, registryValues] = await Promise.all([
-        getSheetValues(token, spreadsheetId, 'ALL_ENTRIES!A:S'),
-        getSheetValues(token, spreadsheetId, '_USER_REGISTRY!A:H'),
-      ]);
-
-      const existingAllRows = allEntriesValues.slice(1);
-      const existingRegistryRows = registryValues.slice(1);
-
-      const retainedAllRows = existingAllRows.filter((row) => !isDebugAllEntriesRow(row));
-      const retainedRegistryRows = existingRegistryRows.filter((row) => !isDebugUserRegistryRow(row));
-
-      const allEntriesMap = new Map<string, Array<string | number>>();
-      for (const row of retainedAllRows) {
-        const entryId = getSheetCell(row, 18);
-        if (!entryId) continue;
-        allEntriesMap.set(entryId, row);
-      }
-      for (const row of giftMasterRows) {
-        const entryId = getSheetCell(row, 18);
-        allEntriesMap.set(entryId, row);
-      }
-
-      const registryMap = new Map<string, Array<string | number>>();
-      for (const row of retainedRegistryRows) {
-        const uid = getSheetCell(row, 0);
-        if (!uid) continue;
-        registryMap.set(uid, row);
-      }
-      registryMap.set(GIFT_UID, [
-        GIFT_UID,
-        giftProfile.email,
-        giftNickname,
-        String(giftProfile.role || 'graphic_designer'),
-        giftKpiSheetName,
-        firstSeenIso,
-        lastSeenIso,
-        giftEntries.length,
-      ]);
-
-      const nextAllEntries = Array.from(allEntriesMap.values()).sort((a, b) => compareRowsByTimestamp(a, b, 4, 18));
-      const nextRegistry = Array.from(registryMap.values()).sort(compareRegistryRows);
-      const nextGiftKpi = giftKpiRows.sort((a, b) => compareRowsByTimestamp(a, b, 2, 14));
-
-      setGiftBackfillStatus('กำลังเขียนข้อมูลลง Google Sheet...');
-
-      await Promise.all([
-        clearSheetValues(token, spreadsheetId, 'ALL_ENTRIES!A:S'),
-        clearSheetValues(token, spreadsheetId, '_USER_REGISTRY!A:H'),
-        clearSheetValues(token, spreadsheetId, `${giftKpiSheetName}!A:O`),
-      ]);
-
-      await Promise.all([
-        updateSheetValues(token, spreadsheetId, 'ALL_ENTRIES!A1', [ALL_ENTRIES_HEADERS, ...nextAllEntries]),
-        updateSheetValues(token, spreadsheetId, '_USER_REGISTRY!A1', [USER_REGISTRY_HEADERS, ...nextRegistry]),
-        updateSheetValues(token, spreadsheetId, `${giftKpiSheetName}!A1`, [KPI_SHEET_HEADERS, ...nextGiftKpi]),
-      ]);
-
-      const cleanedAllRows = existingAllRows.length - retainedAllRows.length;
-      const cleanedRegistryRows = existingRegistryRows.length - retainedRegistryRows.length;
-      const statusMessage = `Gift ${giftEntries.length} รายการ · unmatched ${unmatched} · ลบ debug rows ${cleanedAllRows + cleanedRegistryRows} · ลบ debug tabs ${debugTabs.length}`;
-      setGiftBackfillStatus(statusMessage);
-      showToast(`Backfill Gift สำเร็จ ✓ (${giftEntries.length} รายการ)`);
-    } catch (error) {
-      console.error('Gift backfill failed:', error);
-      setGiftBackfillStatus('Backfill ไม่สำเร็จ');
-      showToast('❌ Backfill Gift ไม่สำเร็จ');
-    } finally {
-      setGiftBackfillBusy(false);
-    }
-  };
-
   // ── Export
-  const buildExportRows = (month: number, year: number, brandMode: BrandMode = 'all') => {
+  const buildExportRows = (month: number, year: number) => {
     return entries
+      .filter((e) => e.user === currentUser?.uid)
       .filter((e) => {
-        const parts = parseDateParts(e.date);
-        return parts?.monthIndex === month && parts?.year === year;
-      })
-      .filter((entry) => {
-        const group = kpiConfig[entry.groupId];
-        const task = group?.tasks.find((item) => item.id === entry.taskId);
-        return matchesBrandMode(getEntryBrands(entry, group, task), brandMode);
+        try {
+          const date = new Date(e.date);
+          return date.getMonth() === month && date.getFullYear() === year;
+        } catch {
+          return false;
+        }
       })
       .sort((a, b) => a.date.localeCompare(b.date));
   };
 
   // ── TXT รายงาน LINE-friendly (ไม่ใช้ box-drawing chars)
   const handleExportTxt = () => {
-    const filtered = buildExportRows(exportMonth, exportYear, summaryBrandMode);
+    const filtered = buildExportRows(exportMonth, exportYear);
     if (filtered.length === 0) { showToast('ไม่มีข้อมูลในเดือนที่เลือก'); return; }
     const monthName    = getMonthNameThai(exportMonth);
     const yr           = exportYear;
-    const scopeSuffix  = summaryBrandMode === 'all' ? 'ALL' : summaryBrandMode.toUpperCase();
     const totalCredits = filtered.reduce((s, e) => s + e.credits, 0);
     const pct          = Math.round(safePercent(totalCredits, monthlyTarget));
     const role         = userProfile ? (ROLE_DEFAULTS[userProfile.role]?.meta.label || userProfile.role) : '';
@@ -3431,7 +2914,6 @@ export default function App() {
 
     let content = `📊 JATRACK KPI REPORT\n`;
     content += `เดือน: ${monthName} ${yr}\n`;
-    content += `แบรนด์: ${summaryBrandModeLabel}\n`;
     content += `${bar}\n`;
     content += `👤 ${displayName}  |  ${role}\n`;
     content += `🎯 เป้าหมาย: ${monthlyTarget} Credits/เดือน\n`;
@@ -3442,13 +2924,12 @@ export default function App() {
       const group     = kpiConfig[gKey];
       const groupRows = filtered.filter(e => e.groupId === gKey);
       const gTotal    = groupRows.reduce((s, e) => s + e.credits, 0);
-      content += `📁 ${groupRows[0]?.groupName || group?.name || gKey}\n`;
+      content += `📁 ${group?.name || gKey}\n`;
       groupRows.forEach((e, idx) => {
         const task = group?.tasks.find(t => t.id === e.taskId);
-        const entryBrands = getEntryBrands(e, group, task);
         const dd   = e.date.slice(8) + '/' + e.date.slice(5,7);
-        content += `  ${idx+1}. [${dd}] ${e.taskName || task?.name || 'Unknown'}\n`;
-        content += `     ${getBrandLabel(entryBrands) || '-'} · ${e.quantity} ${e.unit || task?.unit || ''} x ${e.creditPerUnit ?? task?.creditPerUnit ?? 1} Cr = ${e.credits} Cr\n`;
+        content += `  ${idx+1}. [${dd}] ${task?.name || 'Unknown'}\n`;
+        content += `     ${e.quantity} ${task?.unit || ''} x ${task?.creditPerUnit || 1} Cr = ${e.credits} Cr\n`;
         if (e.notes) content += `     💬 ${e.notes}\n`;
       });
       content += `  รวมกลุ่มนี้: ${gTotal} Credits\n\n`;
@@ -3462,7 +2943,7 @@ export default function App() {
     const blob = new Blob(['\uFEFF' + content], { type: 'text/plain;charset=utf-8' });
     const link = document.createElement('a');
     link.href = URL.createObjectURL(blob);
-    link.download = `Jatrack_${displayName}_${monthName}_${yr}_${scopeSuffix}.txt`;
+    link.download = `Jatrack_${displayName}_${monthName}_${yr}.txt`;
     link.click();
     showToast('ดาวน์โหลด TXT แล้ว ✓');
     setShowExportModal(false);
@@ -3471,7 +2952,7 @@ export default function App() {
   // ── Export to Google Sheets via Sheets API (สร้างใหม่ครั้งแรก / อัปเดตเสมอเมื่อข้อมูลใหม่)
   const handleExportToGoogleSheets = async () => {
     if (sheetsExporting) return;
-    const filtered = buildExportRows(summaryMonth, summaryYear, summaryBrandMode);
+    const filtered = buildExportRows(summaryMonth, summaryYear);
     if (filtered.length === 0) { showToast('ไม่มีข้อมูลในเดือนนี้'); return; }
 
     const token = await ensureDriveAccessToken();
@@ -3480,28 +2961,24 @@ export default function App() {
     setSheetsExporting(true);
     const monthName    = getMonthNameThai(summaryMonth);
     const yr           = summaryYear;
-    const scopeLabel   = summaryBrandModeLabel;
-    const scopeSuffix  = summaryBrandMode === 'all' ? 'ALL' : summaryBrandMode.toUpperCase();
     const totalCredits = filtered.reduce((s, e) => s + e.credits, 0);
     const pct          = Math.round(safePercent(totalCredits, monthlyTarget));
-    const sheetKey     = `sheet_id_${effectiveUid}_${yr}_${summaryMonth}_${summaryBrandMode}`;
+    const sheetKey     = `sheet_id_${yr}_${summaryMonth}`;
     const savedId      = currentUser ? localStorage.getItem(scopedKey(currentUser.uid, sheetKey)) : null;
 
     showToast('⏳ กำลังสร้าง / อัปเดต Google Sheet...');
 
     // Build values (reused for both new + existing)
-    const header = ['#', 'วันที่', 'กลุ่ม', 'แบรนด์', 'Task ID', 'ชื่องาน', 'จำนวน', 'หน่วย', 'Cr/Unit', 'Credits', 'หมายเหตุ', 'Canva Link', 'Drive Link'];
+    const header = ['#', 'วันที่', 'กลุ่ม', 'Task ID', 'ชื่องาน', 'จำนวน', 'หน่วย', 'Cr/Unit', 'Credits', 'หมายเหตุ', 'Canva Link', 'Drive Link'];
     const rows = filtered.map((e, idx) => {
       const g = kpiConfig[e.groupId];
       const t = g?.tasks.find(x => x.id === e.taskId);
-      const entryBrands = getEntryBrands(e, g, t);
-      return [idx + 1, e.date, e.groupName || g?.name || e.groupId, getBrandLabel(entryBrands) || '', e.taskId, e.taskName || t?.name || '', e.quantity, e.unit || t?.unit || '', e.creditPerUnit ?? t?.creditPerUnit ?? 1, e.credits, e.notes || '', e.canvaLink || '', e.driveLink || ''];
+      return [idx + 1, e.date, g?.name || e.groupId, e.taskId, t?.name || '', e.quantity, t?.unit || '', t?.creditPerUnit || 1, e.credits, e.notes || '', e.canvaLink || '', e.driveLink || ''];
     });
     const summary = [[], [`รวมทั้งหมด`, totalCredits, `Cr`, `${pct}% ของเป้า ${monthlyTarget} Cr`]];
     const values  = [
       [`JATRACK KPI REPORT — ${displayName} — ${monthName} ${yr}`],
       [`Export: ${new Date().toLocaleString('th-TH')}`],
-      [`Brand Scope: ${scopeLabel}`],
       [],
       header,
       ...rows,
@@ -3516,7 +2993,7 @@ export default function App() {
           method: 'POST',
           headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            properties: { title: `Jatrack KPI — ${displayName} ${monthName} ${yr} ${scopeSuffix}` },
+            properties: { title: `Jatrack KPI — ${displayName} ${monthName} ${yr}` },
             sheets: [{ properties: { title: 'KPI Report' } }],
           }),
         });
@@ -3529,18 +3006,17 @@ export default function App() {
         if (currentUser) {
           localStorage.setItem(scopedKey(currentUser.uid, sheetKey), spreadsheetId);
           const url = `https://docs.google.com/spreadsheets/d/${spreadsheetId}`;
-          if (effectiveUid) localStorage.setItem(scopedKey(effectiveUid, 'sheet_url'), url);
+          localStorage.setItem(scopedKey(currentUser.uid, 'sheet_url'), url);
           setSheetUrl(url);
         }
       }
 
       // เขียน/อัปเดตข้อมูลเสมอ (ทั้งสร้างใหม่และเปิดซ้ำ)
-      const updateRes = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/A1?valueInputOption=RAW`, {
+      await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/A1?valueInputOption=RAW`, {
         method: 'PUT',
         headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
         body: JSON.stringify({ values }),
       });
-      if (!updateRes.ok) throw new Error('update_failed');
       showToast(savedId ? `✅ อัปเดต Google Sheet แล้ว (${filtered.length} รายการ)` : '✅ สร้าง Google Sheet ใหม่แล้ว!');
       window.open(`https://docs.google.com/spreadsheets/d/${spreadsheetId}`, '_blank');
     } catch {
@@ -3566,7 +3042,6 @@ export default function App() {
         `คุณเป็น KPI Analyst ผู้เชี่ยวชาญ วิเคราะห์ผลการทำงาน KPI ต่อไปนี้และสรุปเป็น**ภาษาไทย** สั้น ชัด อ่านง่าย ใน 3-5 ประโยค:\n\n` +
         `ชื่อ: ${displayName} | ตำแหน่ง: ${role}\n` +
         `เดือน: ${monthName} ${summaryYear}\n` +
-        `แบรนด์: ${summaryBrandModeLabel}\n` +
         `ผลรวม: ${summaryData.totalCredits} / ${monthlyTarget} Credits (${Math.round(summaryData.percent)}%)\n` +
         `จำนวนงาน: ${summaryData.entryCount} รายการ\n` +
         `แยกตามกลุ่ม:\n${groupLines || '  (ยังไม่มีข้อมูล)'}`;
@@ -3589,26 +3064,23 @@ export default function App() {
   };
 
   const handleExportCsv = () => {
-    const filtered = buildExportRows(exportMonth, exportYear, summaryBrandMode);
+    const filtered = buildExportRows(exportMonth, exportYear);
     if (filtered.length === 0) { showToast('ไม่มีข้อมูลในเดือนที่เลือก'); return; }
     const monthName = getMonthNameThai(exportMonth);
     const yr        = exportYear;
-    const scopeSuffix = summaryBrandMode === 'all' ? 'ALL' : summaryBrandMode.toUpperCase();
-    const headers = ['#', 'วันที่', 'กลุ่ม', 'แบรนด์', 'Task ID', 'Task Name', 'จำนวน', 'หน่วย', 'Cr/Unit', 'Credits', 'หมายเหตุ', 'Canva Link', 'Drive Link'];
+    const headers = ['#', 'วันที่', 'กลุ่ม', 'Task ID', 'Task Name', 'จำนวน', 'หน่วย', 'Cr/Unit', 'Credits', 'หมายเหตุ', 'Canva Link', 'Drive Link'];
     const rows = filtered.map((e, idx) => {
       const group = kpiConfig[e.groupId];
       const task  = group?.tasks.find((t) => t.id === e.taskId);
-      const entryBrands = getEntryBrands(e, group, task);
       return [
         idx + 1,
         e.date,
-        `"${e.groupName || group?.name || e.groupId}"`,
-        `"${getBrandLabel(entryBrands) || ''}"`,
+        `"${group?.name || e.groupId}"`,
         e.taskId,
-        `"${e.taskName || task?.name || 'Unknown'}"`,
+        `"${task?.name || 'Unknown'}"`,
         e.quantity,
-        e.unit || task?.unit || '',
-        e.creditPerUnit ?? task?.creditPerUnit ?? 1,
+        task?.unit || '',
+        task?.creditPerUnit || 1,
         e.credits,
         `"${e.notes || ''}"`,
         `"${e.canvaLink || ''}"`,
@@ -3619,7 +3091,7 @@ export default function App() {
     const blob = new Blob(['\uFEFF' + csv], { type: 'text/csv;charset=utf-8' });
     const link = document.createElement('a');
     link.href = URL.createObjectURL(blob);
-    link.download = `Jatrack_${displayName}_${monthName}_${yr}_${scopeSuffix}.csv`;
+    link.download = `Jatrack_${displayName}_${monthName}_${yr}.csv`;
     link.click();
     showToast('ดาวน์โหลด CSV แล้ว ✓');
     setShowExportModal(false);
@@ -3627,11 +3099,10 @@ export default function App() {
 
   // ── Space Sheet Export — professional Google Sheets format
   const handleExportSpaceSheet = () => {
-    const filtered = buildExportRows(exportMonth, exportYear, summaryBrandMode);
+    const filtered = buildExportRows(exportMonth, exportYear);
     if (filtered.length === 0) { showToast('ไม่มีข้อมูลในเดือนที่เลือก'); return; }
     const monthName    = getMonthNameThai(exportMonth);
     const yr           = exportYear;
-    const scopeSuffix  = summaryBrandMode === 'all' ? 'ALL' : summaryBrandMode.toUpperCase();
     const totalCredits = filtered.reduce((s, e) => s + e.credits, 0);
     const pct          = Math.round(safePercent(totalCredits, monthlyTarget));
     const role         = userProfile ? (ROLE_DEFAULTS[userProfile.role]?.meta.label || userProfile.role) : '';
@@ -3643,7 +3114,6 @@ export default function App() {
     rows.push(`${q('JATRACK KPI SPACE SHEET')},${q(`${monthName} ${yr}`)}`);
     rows.push(`${q('Name')},${q(displayName)}`);
     rows.push(`${q('Role')},${q(role)}`);
-    rows.push(`${q('Brand Scope')},${q(summaryBrandModeLabel)}`);
     rows.push(`${q('Monthly Target')},${monthlyTarget},${q('Credits')}`);
     rows.push(`${q('Total Achieved')},${totalCredits},${q(`${pct}% of target`)}`);
     rows.push(`${q('Generated')},${q(new Date().toLocaleString('th-TH'))}`);
@@ -3656,28 +3126,26 @@ export default function App() {
       const groupRows = filtered.filter(e => e.groupId === gKey);
       const gTotal    = groupRows.reduce((s, e) => s + e.credits, 0);
 
-      rows.push(`${q(`▸ ${gKey} — ${groupRows[0]?.groupName || group?.name || gKey}`)}`);
-      rows.push(['#', 'Date', 'Brand', 'Task ID', 'Task Name', 'Qty', 'Unit', 'Cr/Unit', 'Credits', 'Notes', 'Canva', 'Drive'].map(q).join(','));
+      rows.push(`${q(`▸ ${gKey} — ${group?.name || gKey}`)}`);
+      rows.push(['#', 'Date', 'Task ID', 'Task Name', 'Qty', 'Unit', 'Cr/Unit', 'Credits', 'Notes', 'Canva', 'Drive'].map(q).join(','));
 
       groupRows.forEach((e, idx) => {
         const task = group?.tasks.find(t => t.id === e.taskId);
-        const entryBrands = getEntryBrands(e, group, task);
         rows.push([
           idx + 1,
           q(e.date),
-          q(getBrandLabel(entryBrands) || ''),
           q(e.taskId),
-          q(e.taskName || task?.name || 'Unknown'),
+          q(task?.name || 'Unknown'),
           e.quantity,
-          q(e.unit || task?.unit || ''),
-          e.creditPerUnit ?? task?.creditPerUnit ?? 1,
+          q(task?.unit || ''),
+          task?.creditPerUnit || 1,
           e.credits,
           q(e.notes || ''),
           q(e.canvaLink || ''),
           q(e.driveLink || ''),
         ].join(','));
       });
-      rows.push([q('Subtotal'), '', '', '', '', '', '', '', gTotal, '', '', ''].join(','));
+      rows.push(`${q('Subtotal')},,,,,,,,${gTotal}`);
       rows.push(''); // blank row
     });
 
@@ -3695,24 +3163,24 @@ export default function App() {
       ].join(','));
     });
     rows.push('');
-    rows.push([q('GRAND TOTAL'), '', '', '', '', '', '', '', totalCredits, '', '', q(`${pct}% / target ${monthlyTarget} Cr.`)].join(','));
+    rows.push(`${q('GRAND TOTAL')},,,${totalCredits},,,,,${q(`${pct}% / target ${monthlyTarget} Cr.`)}`);
     rows.push(`${q('Generated by Jatrack · Young Age Corporation Co., Ltd. & Pharvia 2025 Co., Ltd.')}`);
 
     const csv  = rows.join('\n');
     const blob = new Blob(['\uFEFF' + csv], { type: 'text/csv;charset=utf-8' });
     const link = document.createElement('a');
     link.href  = URL.createObjectURL(blob);
-    link.download = `Jatrack_SpaceSheet_${displayName}_${monthName}_${yr}_${scopeSuffix}.csv`;
+    link.download = `Jatrack_SpaceSheet_${displayName}_${monthName}_${yr}.csv`;
     link.click();
     showToast('Space Sheet ดาวน์โหลดแล้ว ✓');
     setShowExportModal(false);
   };
 
   // ── Render guards
-  if (authLoading || profileLoading || effectiveProfileLoading) return <LoadingScreen />;
-  if (!currentUser) return <SignInScreen onSignIn={handleSignIn} onEmailSignIn={handleEmailSignIn} loading={signInLoading} toast={toast} />;
-  if (!viewerProfile || !userProfile) return <LoadingScreen />;
-  if (!isActingAs && !viewerProfile.nickname?.trim()) {
+  if (authLoading || profileLoading) return <LoadingScreen />;
+  if (!currentUser) return <SignInScreen onSignIn={handleSignIn} loading={signInLoading} toast={toast} />;
+  if (!userProfile) return <LoadingScreen />;
+  if (!userProfile.nickname?.trim()) {
     return (
       <NicknameSetupScreen
         defaultValue={currentUser.displayName?.split(' ')[0] || ''}
@@ -3721,9 +3189,19 @@ export default function App() {
     );
   }
 
-  const todayEntries   = entries.filter((e) => e.date === getTodayStr());
-  const historyEntries = entries;
+  const todayEntries   = entries.filter((e) => e.user === currentUser.uid && e.date === getTodayStr());
+  const historyEntries = entries.filter((e) => e.user === currentUser.uid);
   const historyDates   = Array.from<string>(new Set(historyEntries.map((e) => e.date))).sort((a, b) => b.localeCompare(a));
+  const navItems: Array<{ key: TabType; label: string; icon: React.ReactNode }> = [
+    { key: 'log', label: 'บันทึก', icon: <PlusCircle size={20} /> },
+    { key: 'today', label: 'วันนี้', icon: <Clock size={20} /> },
+    { key: 'history', label: 'ประวัติ', icon: <History size={20} /> },
+    { key: 'daily', label: 'รายงาน', icon: <FileText size={20} /> },
+    { key: 'summary', label: 'สรุป', icon: <BarChart3 size={20} /> },
+  ];
+  if (isSuperAdmin) {
+    navItems.push({ key: 'admin', label: 'Admin', icon: <UserCircle size={20} /> });
+  }
 
   // ─── MAIN APP ───────────────────────────────────────────────────────────────
   return (
@@ -3749,7 +3227,7 @@ export default function App() {
                 {editEntry.groupId} · {editEntry.taskId}
               </p>
               <p className="font-bold text-[#2C2A28] text-[14px]">
-                {editEntry.taskName || kpiConfig[editEntry.groupId]?.tasks.find((t) => t.id === editEntry.taskId)?.name}
+                {kpiConfig[editEntry.groupId]?.tasks.find((t) => t.id === editEntry.taskId)?.name}
               </p>
             </div>
             <div className="flex items-center justify-between gap-4 bg-slate-50 border border-slate-100 p-2 rounded-2xl">
@@ -3860,26 +3338,7 @@ export default function App() {
 
       {/* Export Modal */}
       <Modal isOpen={showExportModal} onClose={() => setShowExportModal(false)} title="ส่งออกรายงาน">
-          <div className="space-y-4">
-          <div className="space-y-1.5">
-            <p className="text-[9px] font-bold text-slate-400 uppercase tracking-widest">แบรนด์ที่ส่งออก</p>
-            <div className="inline-flex items-center gap-1 rounded-full bg-slate-100 p-1">
-              {(['all', 'y8', 'pv'] as const).map((mode) => (
-                <button
-                  key={mode}
-                  type="button"
-                  onClick={() => setSummaryBrandMode(mode)}
-                  className="px-3 py-1.5 rounded-full text-[10px] font-black tracking-wide transition-all"
-                  style={{
-                    background: summaryBrandMode === mode ? 'linear-gradient(135deg, #F4823C, #F5A855)' : 'transparent',
-                    color: summaryBrandMode === mode ? 'white' : '#64748B',
-                  }}
-                >
-                  {mode === 'all' ? 'All' : mode.toUpperCase()}
-                </button>
-              ))}
-            </div>
-          </div>
+        <div className="space-y-4">
           {/* Month picker */}
           <div>
             <p className="text-[9px] font-bold text-slate-400 uppercase tracking-widest mb-2">เลือกเดือน</p>
@@ -3921,36 +3380,27 @@ export default function App() {
             </div>
             <div>
               <p className="text-[11px] font-bold text-[#2C2A28]">
-                {buildExportRows(exportMonth, exportYear, summaryBrandMode).length} รายการ · {buildExportRows(exportMonth, exportYear, summaryBrandMode).reduce((s,e)=>s+e.credits,0)} Cr.
+                {buildExportRows(exportMonth, exportYear).length} รายการ · {buildExportRows(exportMonth, exportYear).reduce((s,e)=>s+e.credits,0)} Cr.
               </p>
-              <p className="text-[9px] text-slate-400">{getMonthNameThai(exportMonth)} {exportYear} · {summaryBrandModeLabel}</p>
+              <p className="text-[9px] text-slate-400">{getMonthNameThai(exportMonth)} {exportYear}</p>
             </div>
           </div>
 
-          <div className="space-y-2">
-            {/* Space Sheet */}
+          <div className="grid grid-cols-2 gap-2">
             <button
-              onClick={handleExportSpaceSheet}
-              className="w-full py-3.5 bg-gradient-to-r from-[#F4823C] to-[#F5A855] text-white rounded-2xl font-bold text-[13px] flex items-center justify-center gap-2.5 active:scale-95 transition-all glow-orange shadow-sm"
+              onClick={handleExportCsv}
+              className="py-3.5 bg-emerald-500 text-white rounded-2xl font-bold text-[12px] flex items-center justify-center gap-2 active:scale-95 transition-all shadow-sm"
             >
-              <Sparkles size={16} /> Space Sheet (.CSV for Sheets)
+              <Download size={15} /> CSV
             </button>
-            <div className="grid grid-cols-2 gap-2">
-              <button
-                onClick={handleExportCsv}
-                className="py-3.5 bg-emerald-500 text-white rounded-2xl font-bold text-[12px] flex items-center justify-center gap-2 active:scale-95 transition-all shadow-sm"
-              >
-                <Download size={15} /> CSV (Excel)
-              </button>
-              <button
-                onClick={handleExportTxt}
-                className="py-3.5 bg-[#2C2A28] text-white rounded-2xl font-bold text-[12px] flex items-center justify-center gap-2 active:scale-95 transition-all shadow-sm"
-              >
-                <FileText size={15} /> TXT Report
-              </button>
-            </div>
+            <button
+              onClick={handleExportTxt}
+              className="py-3.5 bg-[#2C2A28] text-white rounded-2xl font-bold text-[12px] flex items-center justify-center gap-2 active:scale-95 transition-all shadow-sm"
+            >
+              <FileText size={15} /> TXT Report
+            </button>
           </div>
-          <p className="text-center text-[9px] text-slate-300">Space Sheet = CSV ที่ออกแบบสำหรับ Google Sheets โดยเฉพาะ</p>
+          <p className="text-center text-[9px] text-slate-300">CSV สำหรับตารางงาน, TXT สำหรับรายงานข้อความสรุป</p>
         </div>
       </Modal>
 
@@ -3993,23 +3443,6 @@ export default function App() {
             </div>
           </div>
 
-          {isActingAs && (
-            <div className="px-4 py-3 rounded-2xl bg-violet-50 border border-violet-100 flex items-center justify-between gap-3">
-              <div>
-                <p className="text-[9px] font-bold text-violet-600 uppercase tracking-widest">Acting As User</p>
-                <p className="text-[12px] font-bold text-[#2C2A28] truncate">{displayName}</p>
-                <p className="text-[10px] text-violet-500 truncate">{userProfile?.email || effectiveUid}</p>
-              </div>
-              <button
-                type="button"
-                onClick={() => setActingAsUid(null)}
-                className="px-3 py-2 rounded-xl bg-white text-violet-600 text-[11px] font-bold border border-violet-100"
-              >
-                Return
-              </button>
-            </div>
-          )}
-
           {/* Nickname */}
           <div className="space-y-1.5">
             <label className="text-[10px] font-bold text-slate-400 tracking-widest uppercase">
@@ -4040,6 +3473,71 @@ export default function App() {
             />
           </div>
 
+          <div className="space-y-1.5">
+            <label className="text-[10px] font-bold text-slate-400 tracking-widest uppercase">
+              คำลงท้าย Daily Report
+            </label>
+            <div className="grid grid-cols-2 gap-2">
+              <button
+                type="button"
+                onClick={() => setReportGender('male')}
+                className={`py-3 rounded-2xl border transition-colors flex items-center justify-center gap-2 ${
+                  reportGender === 'male'
+                    ? 'bg-orange-500 text-white border-orange-500'
+                    : 'bg-slate-50 text-slate-500 border-slate-100'
+                }`}
+                aria-label="เลือกคำลงท้ายแบบผู้ชาย"
+              >
+                <span className="text-[18px] leading-none">♂</span>
+                <span className="text-[11px] font-bold">ครับ</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setReportGender('female')}
+                className={`py-3 rounded-2xl border transition-colors flex items-center justify-center gap-2 ${
+                  reportGender === 'female'
+                    ? 'bg-pink-500 text-white border-pink-500'
+                    : 'bg-slate-50 text-slate-500 border-slate-100'
+                }`}
+                aria-label="เลือกคำลงท้ายแบบผู้หญิง"
+              >
+                <span className="text-[18px] leading-none">♀</span>
+                <span className="text-[11px] font-bold">ค่ะ</span>
+              </button>
+            </div>
+          </div>
+
+          <div className="space-y-2">
+            <label className="text-[10px] font-bold text-slate-400 tracking-widest uppercase">
+              Emoji หัวข้อ Daily Report
+            </label>
+            <div className="grid grid-cols-2 gap-2">
+              {[
+                { key: 'focus', label: 'Focus' },
+                { key: 'routine', label: 'Routine' },
+                { key: 'results', label: 'Results' },
+                { key: 'nextMove', label: 'Next Move' },
+                { key: 'issues', label: 'Issues' },
+              ].map((field) => (
+                <div key={field.key} className={field.key === 'issues' ? 'col-span-2' : ''}>
+                  <label className="block text-[9px] font-bold text-slate-400 uppercase tracking-widest mb-1.5">
+                    {field.label}
+                  </label>
+                  <input
+                    type="text"
+                    value={reportEmojis[field.key as keyof typeof reportEmojis]}
+                    onChange={(e) => {
+                      const value = e.target.value.slice(0, 4) || DEFAULT_REPORT_EMOJIS[field.key as keyof typeof DEFAULT_REPORT_EMOJIS];
+                      setReportEmojis((prev) => ({ ...prev, [field.key]: value }));
+                    }}
+                    className="w-full px-4 py-3.5 bg-slate-50 border border-slate-100 rounded-2xl text-[16px] font-semibold outline-none"
+                    placeholder={DEFAULT_REPORT_EMOJIS[field.key as keyof typeof DEFAULT_REPORT_EMOJIS]}
+                  />
+                </div>
+              ))}
+            </div>
+          </div>
+
           {/* Google Sheet URL */}
           <div className="space-y-1.5">
             <label className="text-[10px] font-bold text-slate-400 tracking-widest uppercase">Google Sheet URL</label>
@@ -4068,11 +3566,11 @@ export default function App() {
                 />
                 <button
                   onClick={() => {
-                    navigator.clipboard.writeText(GAS_TEMPLATE).then(() => showToast('คัดลอก GAS Template v4 แล้ว ✓'));
+                    navigator.clipboard.writeText(GAS_TEMPLATE).then(() => showToast('คัดลอก GAS Template v3 แล้ว ✓'));
                   }}
                   className="w-full py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-[11px] font-bold text-slate-500 flex items-center justify-center gap-1.5 active:bg-orange-50 transition-colors"
                 >
-                  📋 Copy GAS Template v4 (Apps Script)
+                  📋 Copy GAS Template v3 (Apps Script)
                 </button>
               </>
             ) : (
@@ -4203,49 +3701,6 @@ export default function App() {
             Role ถูกกำหนดตามอีเมลอัตโนมัติ: host = Graphic Designer, info.nakoleo = Art Director (Admin), อื่นๆ = Custom
           </div>
 
-          <div className="space-y-2 rounded-2xl border border-slate-100 bg-white px-4 py-4">
-            <div>
-              <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Password Login</p>
-              <p className="text-[11px] text-slate-500 mt-1">
-                ใช้กับบัญชี Google ที่ล็อกอินอยู่: {currentUser.email}
-              </p>
-              <p className="text-[10px] text-slate-400 mt-1">
-                ต้องเข้า Google อย่างน้อย 1 ครั้งก่อน จากนั้นจึงตั้งรหัสผ่านเพื่อ login เองได้
-              </p>
-            </div>
-            {hasPasswordLogin && (
-              <input
-                type="password"
-                value={currentPasswordDraft}
-                onChange={(e) => setCurrentPasswordDraft(e.target.value)}
-                placeholder="รหัสผ่านปัจจุบัน"
-                className="w-full px-4 py-3 bg-slate-50 border border-slate-100 rounded-2xl text-[13px] outline-none"
-              />
-            )}
-            <input
-              type="password"
-              value={newPasswordDraft}
-              onChange={(e) => setNewPasswordDraft(e.target.value)}
-              placeholder={hasPasswordLogin ? 'รหัสผ่านใหม่' : 'ตั้งรหัสผ่านใหม่'}
-              className="w-full px-4 py-3 bg-slate-50 border border-slate-100 rounded-2xl text-[13px] outline-none"
-            />
-            <input
-              type="password"
-              value={confirmPasswordDraft}
-              onChange={(e) => setConfirmPasswordDraft(e.target.value)}
-              placeholder="ยืนยันรหัสผ่านใหม่"
-              className="w-full px-4 py-3 bg-slate-50 border border-slate-100 rounded-2xl text-[13px] outline-none"
-            />
-            <button
-              type="button"
-              onClick={() => void handleSavePassword()}
-              disabled={passwordSaving || !newPasswordDraft.trim() || !confirmPasswordDraft.trim() || (hasPasswordLogin && !currentPasswordDraft.trim())}
-              className="w-full py-3 rounded-2xl bg-slate-50 border border-slate-200 text-[12px] font-bold text-[#2C2A28] disabled:opacity-60"
-            >
-              {passwordSaving ? 'กำลังบันทึก...' : hasPasswordLogin ? 'เปลี่ยนรหัสผ่าน' : 'ตั้งรหัสผ่าน'}
-            </button>
-          </div>
-
           {/* KPI Config button (Phase 4/5) */}
           <button
             onClick={() => { setShowSettings(false); setShowKpiEditor(true); }}
@@ -4299,53 +3754,47 @@ export default function App() {
             </button>
           </div>
 
-          <div className={`grid gap-3 ${isSuperAdmin ? 'grid-cols-[1fr_1fr_2fr]' : 'grid-cols-[1fr_2fr]'}`}>
+          <div className="flex gap-3">
             <button
               onClick={handleSignOut}
               className="flex-1 py-4 bg-rose-50 text-rose-500 rounded-2xl font-bold text-[13px] border border-rose-100 flex items-center justify-center gap-2"
             >
               <LogOut size={15} /> Logout
             </button>
-            {isSuperAdmin && (
-              <button
-                type="button"
-                onClick={() => setShowSwitchUserModal(true)}
-                className="flex-1 py-4 bg-violet-50 text-violet-600 rounded-2xl font-bold text-[13px] border border-violet-100 flex items-center justify-center gap-2"
-              >
-                <UserCircle size={15} /> Switch User
-              </button>
-            )}
             <button
               onClick={async () => {
-                if (!currentUser || !effectiveUid) return;
+                if (!currentUser) return;
                 const ok = await handleSaveNickname(nicknameDraft);
                 if (!ok) return;
-                const nextSettings: StoredUserSettings = {
-                  autoHoverExpand,
-                  calY8Url: calY8Url.trim(),
-                  calPvUrl: calPvUrl.trim(),
-                  driveFolderId: driveFolderId.trim(),
-                  sheetUrl: sheetUrl.trim(),
-                };
-                persistLocalUserSettings(effectiveUid, nextSettings);
+                localStorage.setItem(scopedKey(currentUser.uid, 'sheet_url'), sheetUrl.trim());
                 // Only super admin can override the webhook URL
-                if (isSuperAdmin && effectiveUid === currentUser.uid) {
+                if (isSuperAdmin) {
                   localStorage.setItem(scopedKey(currentUser.uid, 'sheets_webhook'), sheetsWebhookUrl.trim());
                 }
                 localStorage.setItem(scopedKey(currentUser.uid, 'gemini_api_key'), geminiApiKey.trim());
+                localStorage.setItem(scopedKey(currentUser.uid, 'report_gender'), reportGender);
+                localStorage.setItem(scopedKey(currentUser.uid, 'report_emojis'), JSON.stringify(reportEmojis));
                 // ── Persist settings + customTitle to Firestore
                 try {
                   const titleVal = customTitleDraft.trim() || null;
-                  await setDoc(doc(db, 'users', effectiveUid), {
+                  await setDoc(doc(db, 'users', currentUser.uid), {
                     customTitle: titleVal,
-                    settings: nextSettings,
+                    settings: {
+                      autoHoverExpand,
+                      calY8Url:      calY8Url.trim(),
+                      calPvUrl:      calPvUrl.trim(),
+                      driveFolderId: driveFolderId.trim(),
+                      sheetUrl:      sheetUrl.trim(),
+                      reportGender,
+                      reportEmojis,
+                      ...(isSuperAdmin ? { sheetsWebhookUrl: sheetsWebhookUrl.trim() } : {}),
+                    },
                     updatedAt: Date.now(),
                   }, { merge: true });
                   setUserProfile(prev => prev ? { ...prev, customTitle: titleVal || undefined,
-                    settings: nextSettings } : prev);
-                  if (effectiveUid === currentUser.uid) {
-                    setViewerProfile(prev => prev ? { ...prev, customTitle: titleVal || undefined, settings: nextSettings } : prev);
-                  }
+                    settings: { autoHoverExpand, calY8Url: calY8Url.trim(), calPvUrl: calPvUrl.trim(),
+                      driveFolderId: driveFolderId.trim(), sheetUrl: sheetUrl.trim(), reportGender, reportEmojis,
+                      ...(isSuperAdmin ? { sheetsWebhookUrl: sheetsWebhookUrl.trim() } : {}) } } : prev);
                 } catch { /* non-critical */ }
                 setShowSettings(false);
                 showToast('บันทึก Config แล้ว');
@@ -4355,47 +3804,6 @@ export default function App() {
             >
               Save
             </button>
-          </div>
-        </div>
-      </Modal>
-
-      <Modal isOpen={showSwitchUserModal} onClose={() => setShowSwitchUserModal(false)} title="Switch User">
-        <div className="space-y-3">
-          <button
-            type="button"
-            onClick={() => {
-              setActingAsUid(null);
-              setShowSwitchUserModal(false);
-            }}
-            className={`w-full px-4 py-3 rounded-2xl border text-left ${!isActingAs ? 'bg-violet-50 border-violet-200' : 'bg-slate-50 border-slate-100'}`}
-          >
-            <p className="text-[12px] font-bold text-[#2C2A28]">Return to Admin</p>
-            <p className="text-[10px] text-slate-400 mt-1">{viewerProfile?.nickname || viewerProfile?.displayName || currentUser?.email}</p>
-          </button>
-          <div className="space-y-2">
-            {adminProfiles
-              .filter((profile) => profile.uid !== currentUser?.uid)
-              .sort((a, b) => (a.nickname || a.displayName || '').localeCompare(b.nickname || b.displayName || ''))
-              .map((profile) => {
-                const active = actingAsUid === profile.uid;
-                return (
-                  <button
-                    key={profile.uid}
-                    type="button"
-                    onClick={() => {
-                      setActingAsUid(profile.uid);
-                      setShowSwitchUserModal(false);
-                      setShowSettings(false);
-                    }}
-                    className={`w-full px-4 py-3 rounded-2xl border text-left transition-colors ${active ? 'bg-violet-50 border-violet-200' : 'bg-slate-50 border-slate-100'}`}
-                  >
-                    <p className="text-[12px] font-bold text-[#2C2A28]">
-                      {profile.nickname || profile.displayName || profile.email}
-                    </p>
-                    <p className="text-[10px] text-slate-400 mt-1">{profile.email}</p>
-                  </button>
-                );
-              })}
           </div>
         </div>
       </Modal>
@@ -4435,22 +3843,6 @@ export default function App() {
             </button>
           </div>
         </div>
-
-        {isActingAs && (
-          <div className="mb-3 flex items-center justify-between gap-3 rounded-[18px] border border-violet-200 bg-white/70 px-4 py-3 backdrop-blur-md">
-            <div className="min-w-0">
-              <p className="text-[8px] font-bold uppercase tracking-widest text-violet-500">Acting As</p>
-              <p className="text-[12px] font-bold text-[#2C2A28] truncate">{displayName}</p>
-            </div>
-            <button
-              type="button"
-              onClick={() => setActingAsUid(null)}
-              className="shrink-0 rounded-xl bg-violet-50 px-3 py-2 text-[10px] font-bold text-violet-600"
-            >
-              Return
-            </button>
-          </div>
-        )}
 
         <div className="grid grid-cols-2 gap-2">
           <div className="bg-white/60 backdrop-blur-md px-4 py-3 rounded-[20px] border border-white/80">
@@ -4494,46 +3886,17 @@ export default function App() {
 
                 {/* Group + Task — Expand/Collapse with animation */}
                 <div className="space-y-2">
-                  <div className="flex items-center justify-between gap-3">
-                    <label className="text-[9px] font-bold text-slate-400 uppercase tracking-widest">กลุ่มงาน</label>
-                    <div className="inline-flex items-center gap-1 rounded-full bg-slate-100 p-1">
-                      {(['all', 'y8', 'pv'] as const).map((mode) => {
-                        const active = logBrandMode === mode;
-                        const label = mode === 'all' ? 'All' : mode.toUpperCase();
-                        return (
-                          <button
-                            key={mode}
-                            type="button"
-                            onClick={() => setLogBrandMode(mode)}
-                            className="px-3 py-1.5 rounded-full text-[10px] font-black tracking-wide transition-all"
-                            style={{
-                              background: active ? 'linear-gradient(135deg, #F4823C, #F5A855)' : 'transparent',
-                              color: active ? 'white' : '#64748B',
-                              boxShadow: active ? '0 6px 16px rgba(244,130,60,0.22)' : 'none',
-                            }}
-                          >
-                            {label}
-                          </button>
-                        );
-                      })}
-                    </div>
-                  </div>
+                  <label className="text-[9px] font-bold text-slate-400 uppercase tracking-widest">กลุ่มงาน</label>
                   <div className="space-y-2">
-                    {visibleLogGroupKeys.length === 0 && (
-                      <div className="rounded-[18px] border border-dashed border-orange-200 bg-orange-50/70 px-4 py-4">
-                        <p className="text-[11px] font-bold text-[#F4823C]">ไม่มีกลุ่ม KPI สำหรับ {logBrandModeLabel}</p>
-                        <p className="text-[10px] text-slate-500 mt-1">
-                          ไปที่ KPI Config แล้วติ๊กแบรนด์ให้รายการงาน หรือสลับกลับเป็น All เพื่อดูทั้งหมด
-                        </p>
-                      </div>
-                    )}
-                    {visibleLogGroupKeys.map((key) => {
+                    {orderedGroupKeys.map((key) => {
                       const grp        = kpiConfig[key];
-                      const visibleTasks = getVisibleTasksForGroup(grp, logBrandMode);
                       const isActive   = selectedGroup === key;
                       const isExpanded = expandedGroups.has(key) || (autoHoverExpand && hoveredGroup === key);
-                      const brandLabel = getBrandLabel(grp.brands);
-                      const brandChipStyle = getBrandChipStyle(grp.brands);
+                      const hasY8 = grp.brands?.includes('y8');
+                      const hasPv = grp.brands?.includes('pv');
+                      const brandLabel = hasY8 && hasPv ? 'Y8-PV' : hasY8 ? 'Y8' : hasPv ? 'PV' : null;
+                      const brandBg    = hasY8 && hasPv ? 'linear-gradient(90deg,#FEF3E2,#FDE8F2)' : hasY8 ? '#FEF3E2' : '#FDE8F2';
+                      const brandColor = hasY8 && hasPv ? '#9D5C1A' : hasY8 ? '#F4823C' : '#E87AA5';
                       return (
                         <div key={key}
                           className="rounded-[16px] overflow-hidden border transition-all duration-200"
@@ -4545,7 +3908,7 @@ export default function App() {
                           <button className="w-full flex items-center gap-2 px-3 py-2.5 text-left"
                             onClick={() => {
                               setSelectedGroup(key);
-                              setSelectedTaskId(visibleTasks[0]?.id || '');
+                              setSelectedTaskId(grp.tasks[0]?.id || '');
                               setExpandedGroups(prev => {
                                 const s = new Set(prev);
                                 s.has(key) ? s.delete(key) : s.add(key);
@@ -4562,12 +3925,12 @@ export default function App() {
                                 <p className="text-[12px] font-bold text-[#2C2A28] truncate">{grp.name}</p>
                                 {brandLabel && (
                                   <span className="text-[7px] px-1.5 py-0.5 rounded font-bold shrink-0"
-                                    style={brandChipStyle}>
+                                    style={{ background: brandBg, color: brandColor }}>
                                     {brandLabel}
                                   </span>
                                 )}
                               </div>
-                              <p className="text-[9px] text-slate-400">{visibleTasks.length} งาน</p>
+                              <p className="text-[9px] text-slate-400">{grp.tasks.length} งาน</p>
                             </div>
                             <ChevronDown size={14}
                               className="text-slate-300 shrink-0 transition-transform duration-200"
@@ -4577,13 +3940,13 @@ export default function App() {
 
                           {/* Task list — smooth height animation */}
                           <div style={{
-                            maxHeight: isExpanded ? `${visibleTasks.length * 96 + 60}px` : '0px',
+                            maxHeight: isExpanded ? `${grp.tasks.length * 80 + 60}px` : '0px',
                             overflow: 'hidden',
                             transition: 'max-height 0.35s cubic-bezier(0.4,0,0.2,1)',
                           }}>
                             <div className="px-3 pb-2.5 space-y-1.5 border-t" style={{ borderColor: `${grp.color}33` }}>
                               <p className="text-[8px] font-bold text-slate-400 uppercase tracking-widest pt-2">เลือกงาน</p>
-                              {visibleTasks.map((t) => (
+                              {grp.tasks.map((t) => (
                                 <button key={t.id}
                                   onClick={() => { setSelectedTaskId(t.id); setSelectedGroup(key); }}
                                   className="w-full flex items-center justify-between px-3 py-2 rounded-xl transition-all text-left"
@@ -4593,18 +3956,8 @@ export default function App() {
                                     border: `1px solid ${selectedTaskId === t.id && isActive ? grp.color : 'rgb(241 245 249)'}`,
                                   }}>
                                   <div className="min-w-0">
-                                    <div className="flex items-center gap-1.5 min-w-0">
-                                      <span className="text-[10px] font-black opacity-70 mr-1">[{t.id}]</span>
-                                      <span className="text-[12px] font-semibold truncate">{t.name}</span>
-                                      {getBrandLabel(getTaskBrands(t, grp)) && (
-                                        <span
-                                          className="text-[7px] px-1.5 py-0.5 rounded font-black shrink-0"
-                                          style={getBrandChipStyle(getTaskBrands(t, grp))}
-                                        >
-                                          {getBrandLabel(getTaskBrands(t, grp))}
-                                        </span>
-                                      )}
-                                    </div>
+                                    <span className="text-[10px] font-black opacity-70 mr-1">[{t.id}]</span>
+                                    <span className="text-[12px] font-semibold">{t.name}</span>
                                   </div>
                                   <span className="shrink-0 text-[11px] font-black ml-2 opacity-80">
                                     {t.creditPerUnit} Cr/{t.unit}
@@ -4623,12 +3976,11 @@ export default function App() {
                 <div className="flex gap-3 items-end">
                   <div className="flex-1 space-y-1.5">
                     <label className="text-[9px] font-bold text-slate-400 uppercase tracking-widest">
-                      จำนวน ({currentTask?.unit || '-'})
+                      จำนวน ({currentTask?.unit})
                     </label>
                     <div className="flex items-center bg-slate-50 border border-slate-200 rounded-xl overflow-hidden">
                       <button
                         onClick={() => setQuantity(Math.max(1, quantity - 1))}
-                        disabled={!currentTask}
                         className="w-11 h-11 flex items-center justify-center text-slate-400 active:bg-slate-100 transition-colors"
                       >
                         <Minus size={16} />
@@ -4636,7 +3988,6 @@ export default function App() {
                       <span className="flex-1 text-center text-[22px] font-black text-[#2C2A28]">{quantity}</span>
                       <button
                         onClick={() => setQuantity(quantity + 1)}
-                        disabled={!currentTask}
                         className="w-11 h-11 flex items-center justify-center text-slate-400 active:bg-slate-100 transition-colors"
                       >
                         <Plus size={16} />
@@ -4646,7 +3997,7 @@ export default function App() {
                   <div className="space-y-1.5">
                     <label className="text-[9px] font-bold text-slate-400 uppercase tracking-widest">Credits</label>
                     <div className="h-11 px-4 rounded-xl flex items-center justify-center gap-1 min-w-[76px]" style={{ background: 'linear-gradient(135deg, #F4823C, #F5A855)' }}>
-                      <span className="text-[22px] font-light text-white">{quantity * (currentTask?.creditPerUnit || 0)}</span>
+                      <span className="text-[22px] font-light text-white">{quantity * (currentTask?.creditPerUnit || 1)}</span>
                       <span className="text-[9px] text-white/60 mt-1">Cr.</span>
                     </div>
                   </div>
@@ -4745,11 +4096,11 @@ export default function App() {
 
                 <button
                   onClick={handleAddEntry}
-                  disabled={isLoading || !currentTask}
-                  className={`w-full py-4 text-white rounded-xl font-bold text-[13px] tracking-[0.15em] shadow-md active:scale-95 transition-all glow-orange ${(isLoading || !currentTask) ? 'opacity-60' : ''}`}
+                  disabled={isLoading}
+                  className={`w-full py-4 text-white rounded-xl font-bold text-[13px] tracking-[0.15em] shadow-md active:scale-95 transition-all glow-orange ${isLoading ? 'opacity-60' : ''}`}
                   style={{ background: 'linear-gradient(135deg, #F4823C, #F5A855)' }}
                 >
-                  {isLoading ? <RefreshCw className="animate-spin mx-auto" size={18} /> : currentTask ? 'บันทึกข้อมูล' : 'ไม่มีกลุ่มให้บันทึก'}
+                  {isLoading ? <RefreshCw className="animate-spin mx-auto" size={18} /> : 'บันทึกข้อมูล'}
                 </button>
               </div>
             </section>
@@ -4858,6 +4209,262 @@ export default function App() {
           </div>
         )}
 
+        {/* DAILY REPORT TAB */}
+        {activeTab === 'daily' && (
+          <div className="space-y-4 animate-in fade-in slide-in-from-bottom-2 duration-300">
+            <div className="bg-white p-4 rounded-[24px] border border-slate-100 shadow-sm space-y-4">
+              <div className="flex items-center gap-2">
+                <FileText size={15} className="text-[#F4823C]" />
+                <div>
+                  <p className="text-[11px] font-bold text-[#2C2A28] uppercase tracking-widest">Daily Report</p>
+                  <p className="text-[9px] text-slate-400">สร้างข้อความรายงานสำหรับส่ง LINE และบันทึก history อัตโนมัติ</p>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-3 gap-2">
+                {[
+                  { key: 'morning', label: 'Morning', icon: <Sun size={14} /> },
+                  { key: 'evening', label: 'Evening', icon: <Moon size={14} /> },
+                  { key: 'history', label: 'History', icon: <History size={14} /> },
+                ].map((tab) => (
+                  <button
+                    key={tab.key}
+                    onClick={() => setDailyTab(tab.key as 'morning' | 'evening' | 'history')}
+                    className={`py-3 rounded-2xl border text-[11px] font-bold flex items-center justify-center gap-1.5 transition-colors ${
+                      dailyTab === tab.key
+                        ? 'bg-[#2C2A28] text-[#F4823C] border-[#2C2A28]'
+                        : 'bg-slate-50 text-slate-400 border-slate-100'
+                    }`}
+                  >
+                    {tab.icon}
+                    {tab.label}
+                  </button>
+                ))}
+              </div>
+
+              <div className="space-y-1.5">
+                <label className="text-[9px] font-bold text-slate-400 uppercase tracking-widest">วันที่รายงาน</label>
+                <input
+                  type="date"
+                  value={dailyDate}
+                  onChange={(e) => setDailyDate(e.target.value)}
+                  className="w-full px-4 py-3 bg-[#FDFAF7] border border-slate-200 rounded-xl font-semibold text-[#2C2A28] text-[13px] outline-none"
+                />
+              </div>
+            </div>
+
+            {dailyTab === 'morning' && (
+              <div className="space-y-4">
+                <section className="bg-white p-4 rounded-[24px] border border-slate-100 shadow-sm space-y-4">
+                  <div className="grid grid-cols-2 gap-3">
+                    <div className="px-4 py-3 bg-slate-50 rounded-2xl border border-slate-100">
+                      <p className="text-[9px] font-bold text-slate-400 uppercase tracking-widest">ผู้รายงาน</p>
+                      <p className="text-[13px] font-bold text-[#2C2A28] mt-1">{displayName}</p>
+                    </div>
+                    <div className="space-y-1.5">
+                      <label className="text-[9px] font-bold text-slate-400 uppercase tracking-widest">Check-in</label>
+                      <input
+                        type="time"
+                        value={morningCheckInTime}
+                        onChange={(e) => setMorningCheckInTime(e.target.value)}
+                        className="w-full px-4 py-3 bg-[#FDFAF7] border border-slate-200 rounded-xl text-[13px] font-semibold outline-none"
+                      />
+                    </div>
+                  </div>
+
+                  <DailyListField
+                    label="Focus (งานที่โฟกัสหรือเร่งด่วนวันนี้)"
+                    prefix="F"
+                    items={morningFocusItems}
+                    onAdd={() => addDailyListItem(setMorningFocusItems)}
+                    onChange={(index, value) => updateDailyListItem(setMorningFocusItems, index, value)}
+                    onRemove={(index) => removeDailyListItem(setMorningFocusItems, index)}
+                  />
+
+                  <button
+                    onClick={() => void saveAndCopyDailyReport('morning')}
+                    disabled={dailySaving}
+                    className="w-full py-4 text-white rounded-2xl font-bold text-[13px] tracking-wide active:scale-95 transition-all glow-orange disabled:opacity-60"
+                    style={{ background: 'linear-gradient(135deg, #F4823C, #F5A855)' }}
+                  >
+                    {dailySaving ? 'กำลังบันทึก...' : dailyCopySuccess ? 'Copied for LINE ✓' : 'Save & Copy for LINE'}
+                  </button>
+                </section>
+
+                <section className="bg-[#2C2A28] p-4 rounded-[24px] border border-[#2C2A28] shadow-sm space-y-3">
+                  <div className="flex items-center justify-between">
+                    <p className="text-[10px] font-bold text-white/60 uppercase tracking-widest">Preview</p>
+                    <button
+                      onClick={() => void copyDailyText(morningPreviewText).then(() => showToast('คัดลอก Preview แล้ว ✓')).catch(() => showToast('❌ คัดลอกไม่สำเร็จ'))}
+                      className="px-3 py-1.5 rounded-xl bg-white/10 text-white text-[10px] font-bold flex items-center gap-1.5"
+                    >
+                      {dailyCopySuccess ? <ClipboardCheck size={13} className="text-emerald-300" /> : <Copy size={13} />}
+                      Copy
+                    </button>
+                  </div>
+                  <pre className="whitespace-pre-wrap text-[11px] leading-relaxed text-white/90 font-mono">{morningPreviewText}</pre>
+                </section>
+              </div>
+            )}
+
+            {dailyTab === 'evening' && (
+              <div className="space-y-4">
+                <section className="bg-white p-4 rounded-[24px] border border-slate-100 shadow-sm space-y-4">
+                  <div className="px-4 py-3 bg-slate-50 rounded-2xl border border-slate-100">
+                    <p className="text-[9px] font-bold text-slate-400 uppercase tracking-widest">Auto Draft จาก Work Log</p>
+                    <p className="text-[12px] font-bold text-[#2C2A28] mt-1">{dailyEntriesForDate.length} รายการในวันที่เลือก</p>
+                    <p className="text-[9px] text-slate-400 mt-1">Routine และ Results จะดึงจากงานที่บันทึกไว้ของวันนั้นให้อัตโนมัติ</p>
+                  </div>
+
+                  <DailyListField
+                    label="Routine"
+                    prefix="✔️"
+                    items={eveningRoutineItems}
+                    onAdd={() => addDailyListItem(setEveningRoutineItems)}
+                    onChange={(index, value) => updateDailyListItem(setEveningRoutineItems, index, value)}
+                    onRemove={(index) => removeDailyListItem(setEveningRoutineItems, index)}
+                  />
+
+                  <DailyListField
+                    label="Results (ผลลัพธ์ของงานวันนี้)"
+                    prefix="R"
+                    items={eveningResultItems}
+                    onAdd={() => addDailyListItem(setEveningResultItems)}
+                    onChange={(index, value) => updateDailyListItem(setEveningResultItems, index, value)}
+                    onRemove={(index) => removeDailyListItem(setEveningResultItems, index)}
+                  />
+
+                  <DailyListField
+                    label="Next Move (พรุ่งนี้จะทำอะไรต่อ)"
+                    prefix="N"
+                    items={eveningNextMoveItems}
+                    onAdd={() => addDailyListItem(setEveningNextMoveItems)}
+                    onChange={(index, value) => updateDailyListItem(setEveningNextMoveItems, index, value)}
+                    onRemove={(index) => removeDailyListItem(setEveningNextMoveItems, index)}
+                  />
+
+                  <div className="space-y-3">
+                    <div className="space-y-1.5">
+                      <label className="text-[9px] font-bold text-slate-400 uppercase tracking-widest">Issues</label>
+                      <input
+                        type="text"
+                        value={dailyIssues}
+                        onChange={(e) => setDailyIssues(e.target.value)}
+                        placeholder="มีปัญหาอะไรไหม? ถ้าไม่มีใส่ 'ไม่มี'"
+                        className="w-full px-4 py-3 bg-[#FDFAF7] border border-slate-200 rounded-xl text-[13px] outline-none"
+                      />
+                    </div>
+                    <div className="grid grid-cols-2 gap-2">
+                      <button
+                        type="button"
+                        onClick={() => setDailyIssueStatus('resolved')}
+                        className={`py-3 rounded-2xl border text-[11px] font-bold transition-colors ${
+                          dailyIssueStatus === 'resolved' ? 'bg-emerald-500 text-white border-emerald-500' : 'bg-slate-50 text-slate-500 border-slate-100'
+                        }`}
+                      >
+                        แก้ไขได้แล้ว
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setDailyIssueStatus('unresolved')}
+                        className={`py-3 rounded-2xl border text-[11px] font-bold transition-colors ${
+                          dailyIssueStatus === 'unresolved' ? 'bg-rose-500 text-white border-rose-500' : 'bg-slate-50 text-slate-500 border-slate-100'
+                        }`}
+                      >
+                        ยังแก้ไขไม่ได้
+                      </button>
+                    </div>
+                    <textarea
+                      value={dailyIssueDetail}
+                      onChange={(e) => setDailyIssueDetail(e.target.value)}
+                      placeholder="รายละเอียดปัญหา / การแก้ไข"
+                      rows={2}
+                      className="w-full px-4 py-3 bg-[#FDFAF7] border border-slate-200 rounded-2xl text-[13px] outline-none resize-none"
+                    />
+                    <textarea
+                      value={dailyIssueNextStep}
+                      onChange={(e) => setDailyIssueNextStep(e.target.value)}
+                      placeholder="แนวทางการดำเนินการต่อ"
+                      rows={2}
+                      className="w-full px-4 py-3 bg-[#FDFAF7] border border-slate-200 rounded-2xl text-[13px] outline-none resize-none"
+                    />
+                  </div>
+
+                  <button
+                    onClick={() => void saveAndCopyDailyReport('evening')}
+                    disabled={dailySaving}
+                    className="w-full py-4 text-white rounded-2xl font-bold text-[13px] tracking-wide active:scale-95 transition-all glow-orange disabled:opacity-60"
+                    style={{ background: 'linear-gradient(135deg, #F4823C, #F5A855)' }}
+                  >
+                    {dailySaving ? 'กำลังบันทึก...' : dailyCopySuccess ? 'Copied for LINE ✓' : 'Save & Copy for LINE'}
+                  </button>
+                </section>
+
+                <section className="bg-[#2C2A28] p-4 rounded-[24px] border border-[#2C2A28] shadow-sm space-y-3">
+                  <div className="flex items-center justify-between">
+                    <p className="text-[10px] font-bold text-white/60 uppercase tracking-widest">Preview</p>
+                    <button
+                      onClick={() => void copyDailyText(eveningPreviewText).then(() => showToast('คัดลอก Preview แล้ว ✓')).catch(() => showToast('❌ คัดลอกไม่สำเร็จ'))}
+                      className="px-3 py-1.5 rounded-xl bg-white/10 text-white text-[10px] font-bold flex items-center gap-1.5"
+                    >
+                      {dailyCopySuccess ? <ClipboardCheck size={13} className="text-emerald-300" /> : <Copy size={13} />}
+                      Copy
+                    </button>
+                  </div>
+                  <pre className="whitespace-pre-wrap text-[11px] leading-relaxed text-white/90 font-mono">{eveningPreviewText}</pre>
+                </section>
+              </div>
+            )}
+
+            {dailyTab === 'history' && (
+              <div className="space-y-3">
+                {dailyReportsLoading ? (
+                  <div className="text-center py-16 bg-white rounded-[24px] border border-dashed border-slate-200">
+                    <RefreshCw size={24} className="text-slate-200 mx-auto mb-3 animate-spin" />
+                    <p className="text-slate-300 text-[11px] font-bold uppercase tracking-widest">กำลังโหลด Daily Reports</p>
+                  </div>
+                ) : dailyReports.length === 0 ? (
+                  <div className="text-center py-16 bg-white rounded-[24px] border border-dashed border-slate-200">
+                    <History size={26} className="text-slate-200 mx-auto mb-3" />
+                    <p className="text-slate-300 text-[11px] font-bold uppercase tracking-widest">ยังไม่มี Daily Report</p>
+                  </div>
+                ) : (
+                  dailyReports.map((report) => (
+                    <div key={report.id} className="bg-white p-4 rounded-[20px] border border-slate-100 shadow-sm space-y-3">
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="min-w-0">
+                          <div className="flex items-center gap-2">
+                            <span className={`w-8 h-8 rounded-xl flex items-center justify-center ${report.type === 'morning' ? 'bg-orange-50 text-orange-500' : 'bg-pink-50 text-pink-500'}`}>
+                              {report.type === 'morning' ? <Sun size={15} /> : <Moon size={15} />}
+                            </span>
+                            <div>
+                              <p className="text-[12px] font-bold text-[#2C2A28]">{report.type === 'morning' ? 'Morning Report' : 'Evening Report'}</p>
+                              <p className="text-[9px] text-slate-400">{formatThaiDate(report.date, true)}</p>
+                            </div>
+                          </div>
+                        </div>
+                        <button
+                          onClick={() => void handleCopyDailyHistory(report)}
+                          className="shrink-0 px-3 py-2 rounded-xl bg-slate-50 border border-slate-100 text-[10px] font-bold text-slate-500 flex items-center gap-1.5"
+                        >
+                          <Copy size={12} /> Copy Again
+                        </button>
+                      </div>
+                      <p className="text-[11px] text-slate-500 leading-relaxed whitespace-pre-line">
+                        {report.generatedText.split('\n').slice(0, 6).join('\n')}
+                      </p>
+                      <div className="flex items-center justify-between text-[9px] text-slate-300">
+                        <span>อัปเดตล่าสุด {new Date(report.updatedAt).toLocaleString('th-TH')}</span>
+                        <span>{report.lastCopiedAt ? `คัดลอกล่าสุด ${new Date(report.lastCopiedAt).toLocaleTimeString('th-TH', { hour: '2-digit', minute: '2-digit' })}` : 'ยังไม่เคยคัดลอกซ้ำ'}</span>
+                      </div>
+                    </div>
+                  ))
+                )}
+              </div>
+            )}
+          </div>
+        )}
+
         {/* SUMMARY TAB */}
         {activeTab === 'summary' && (
           <div className="space-y-3.5 animate-in fade-in slide-in-from-bottom-2 duration-300">
@@ -4883,32 +4490,11 @@ export default function App() {
               </button>
             </div>
 
-            <div className="flex items-center justify-between gap-3 bg-white rounded-[18px] px-3 py-2.5 border border-slate-100 shadow-sm">
-              <p className="text-[9px] font-bold text-slate-400 uppercase tracking-widest">Brand Filter</p>
-              <div className="inline-flex items-center gap-1 rounded-full bg-slate-100 p-1">
-                {(['all', 'y8', 'pv'] as const).map((mode) => (
-                  <button
-                    key={mode}
-                    type="button"
-                    onClick={() => setSummaryBrandMode(mode)}
-                    className="px-3 py-1.5 rounded-full text-[10px] font-black tracking-wide transition-all"
-                    style={{
-                      background: summaryBrandMode === mode ? 'linear-gradient(135deg, #F4823C, #F5A855)' : 'transparent',
-                      color: summaryBrandMode === mode ? 'white' : '#64748B',
-                    }}
-                  >
-                    {mode === 'all' ? 'All' : mode.toUpperCase()}
-                  </button>
-                ))}
-              </div>
-            </div>
-
             {/* Main Progress Card */}
             <section className="bg-white p-5 rounded-[24px] border border-slate-100 shadow-sm">
               <div className="flex justify-between items-start mb-4">
                 <div>
                   <p className="text-[9px] font-bold text-slate-400 uppercase tracking-widest mb-1">Progress</p>
-                  <p className="text-[9px] text-slate-300 mb-1">{summaryBrandModeLabel}</p>
                   <div className="flex items-end gap-2">
                     <p className="text-[38px] font-light text-[#2C2A28] leading-none">{summaryData.totalCredits}</p>
                     <p className="text-[14px] text-slate-300 mb-0.5">/ {monthlyTarget} Cr.</p>
@@ -4985,7 +4571,6 @@ export default function App() {
               <div className="text-center py-12 bg-white rounded-[24px] border border-dashed border-slate-200">
                 <BarChart3 size={26} className="text-slate-200 mx-auto mb-3" />
                 <p className="text-slate-300 text-[11px] font-bold uppercase tracking-widest">ไม่มีข้อมูลในเดือนนี้</p>
-                <p className="text-[10px] text-slate-300 mt-1">{summaryBrandModeLabel}</p>
               </div>
             )}
 
@@ -5289,14 +4874,21 @@ export default function App() {
 
       {/* ─── BOTTOM NAV ─────────────────────────────────────────────────────── */}
       <nav className="fixed bottom-0 left-0 right-0 max-w-md mx-auto bg-white/95 backdrop-blur-xl border-t border-slate-100/80 z-[60] shadow-2xl flex flex-col items-center">
-        <div className="flex items-center justify-around w-full px-3 pt-3 pb-2">
-          <NavButton active={activeTab === 'log'}     onClick={() => setActiveTab('log')}     icon={<PlusCircle size={22} />} label="บันทึก" />
-          <NavButton active={activeTab === 'today'}   onClick={() => setActiveTab('today')}   icon={<Clock size={22} />}      label="วันนี้" />
-          <NavButton active={activeTab === 'history'} onClick={() => setActiveTab('history')} icon={<History size={22} />}    label="ประวัติ" />
-          <NavButton active={activeTab === 'summary'} onClick={() => setActiveTab('summary')} icon={<BarChart3 size={22} />}  label="สรุป" />
-          {isSuperAdmin && (
-            <NavButton active={activeTab === 'admin'} onClick={() => setActiveTab('admin')} icon={<UserCircle size={22} />} label="Admin" />
-          )}
+        <div
+          className="grid items-start w-full px-2 pt-3 pb-2 gap-1"
+          style={{ gridTemplateColumns: `repeat(${navItems.length}, minmax(0, 1fr))` }}
+        >
+          {navItems.map((item) => (
+            <div key={item.key}>
+              <NavButton
+                active={activeTab === item.key}
+                onClick={() => setActiveTab(item.key)}
+                icon={item.icon}
+                label={item.label}
+                compact={navItems.length >= 6}
+              />
+            </div>
+          ))}
         </div>
         <p className="text-[8px] text-slate-300/80 tracking-widest pb-[calc(0.4rem+env(safe-area-inset-bottom))]">
           © 2026 Young Age Corporation Co., Ltd. & Pharvia 2025 Co., Ltd.

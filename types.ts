@@ -115,7 +115,42 @@ export interface UserProfile {
     calPvUrl?: string;
     driveFolderId?: string;
     sheetUrl?: string;
+    sheetsWebhookUrl?: string;
+    reportGender?: 'male' | 'female';
+    reportEmojis?: {
+      focus?: string;
+      routine?: string;
+      results?: string;
+      nextMove?: string;
+      issues?: string;
+    };
   };
 }
 
-export type TabType = 'log' | 'today' | 'history' | 'summary' | 'admin';
+export type DailyReportType = 'morning' | 'evening';
+
+export interface DailyReport {
+  id: string;
+  type: DailyReportType;
+  date: string;
+  uid: string;
+  email: string;
+  nickname: string;
+  gender: 'male' | 'female';
+  checkInTime?: string;
+  focusItems: string[];
+  routineItems: string[];
+  resultItems: string[];
+  nextMoveItems: string[];
+  issues: string;
+  issueStatus: 'resolved' | 'unresolved';
+  issueDetail: string;
+  issueNextStep: string;
+  sourceEntryIds: string[];
+  generatedText: string;
+  createdAt: number;
+  updatedAt: number;
+  lastCopiedAt?: number;
+}
+
+export type TabType = 'log' | 'today' | 'history' | 'daily' | 'summary' | 'admin';
