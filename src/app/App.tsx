@@ -6,7 +6,7 @@ import {
   ChevronDown, FileText, Sparkles, Download, RefreshCw,
   LogOut, ChevronLeft, ChevronRight, TrendingUp, Wifi, WifiOff,
   Save, Sliders, UserCircle, Upload, ExternalLink, AlertTriangle,
-  FolderOpen, Copy, ClipboardCheck, Sun, Moon,
+  Copy, ClipboardCheck, Sun, Moon,
 } from 'lucide-react';
 import {
   collection, collectionGroup, doc, setDoc, deleteDoc,
@@ -16,10 +16,13 @@ import {
   signInWithPopup, signOut, onAuthStateChanged, type User,
   reauthenticateWithPopup, GoogleAuthProvider,
 } from 'firebase/auth';
-import { db, auth, googleProvider, createDriveProvider, firebaseApp } from './firebase';
-import { WORK_GROUPS } from './constants';
-import { WorkEntry, WorkGroup, WorkGroups, TabType, UserProfile, RoleId, DriveAttachment, LocalFileRef, DailyReport, DailyReportType } from './types';
-import { ROLE_DEFAULTS, ROLE_EMOJI } from './roleDefaults';
+import { db, auth, googleProvider, createDriveProvider, firebaseApp } from '../lib/firebase/client';
+import { adminDeleteUser as adminDeleteUserCallable, generateMonthlySummary as generateMonthlySummaryCallable } from '../lib/functionsClient';
+import { LoadingScreen as AuthLoadingScreen, NicknameSetupScreen as AuthNicknameSetupScreen, SignInScreen as AuthSignInScreen } from '../features/auth/screens';
+import { resolveAppViewState } from './viewState';
+import { WORK_GROUPS } from '@/config/constants';
+import type { WorkEntry, WorkGroup, WorkGroups, TabType, UserProfile, RoleId, DriveAttachment, LocalFileRef, DailyReport, DailyReportType } from '@/domain/types';
+import { ROLE_DEFAULTS, ROLE_EMOJI } from '@/config/roleDefaults';
 
 // ─── HELPERS ─────────────────────────────────────────────────────────────────
 const HOST_EMAIL = 'host.y8@gmail.com';
@@ -66,26 +69,6 @@ const dateToLocalStr = (date: Date) => {
 
 const safePercent = (value: number, target: number) =>
   target > 0 ? Math.min((value / target) * 100, 100) : 0;
-
-const sheetSafe = (value: string, fallback = 'User') => {
-  const cleaned = value
-    .trim()
-    .replace(/[\\/?*\[\]:]/g, '')
-    .replace(/\s+/g, '_')
-    .slice(0, 70);
-  return cleaned || fallback;
-};
-
-const buildSheetNames = (nickname: string, uid?: string) => {
-  const uidTag = (uid || 'xxxxxx').replace(/[^a-zA-Z0-9]/g, '').slice(0, 6) || 'xxxxxx';
-  const base = sheetSafe(nickname, `User_${uidTag}`).slice(0, 50);
-  const ownerKey = `${base}_${uidTag}`;
-  return {
-    ownerKey,
-    masterSheetName: `${ownerKey}_KPI_MASTER`,
-    dashboardSheetName: `${ownerKey}_Dashboard`,
-  };
-};
 
 const getInitialKpiForEmail = (email?: string | null) => {
   if (isHostEmail(email)) {
@@ -289,258 +272,6 @@ interface PendingUploadFile {
   normalizedName: string;
   mode: 'log' | 'edit';
 }
-
-// GAS Webhook URL — pre-configured so users don't need to enter it manually
-const DEFAULT_GAS_WEBHOOK = 'https://script.google.com/macros/s/AKfycbwDJGgNGMDD16WAlIGubufbxecHIOft4Z4g_HsZ_epughpXNgwHqNJM3fWExOJ3aqVX/exec';
-
-// GAS v3 — Single-spreadsheet, multi-user, auto-creates sheets, supports attachments[] + Drive folders + delete_user
-const GAS_TEMPLATE = `// ================================================================
-// JATRACK — Google Apps Script v3
-// Single Spreadsheet | Multi-User | Auto-Setup | Supports Attachments
-// Drive Folder Sync | User Delete Logging
-// Admin-only backend. Users never configure this.
-// ================================================================
-var VERSION = '3.0';
-var S_CONFIG  = '_CONFIG';
-var S_USERS   = '_USER_REGISTRY';
-var S_ENTRIES = 'ALL_ENTRIES';
-
-var ENTRY_HEADERS = [
-  'timestamp','date','uid','email','nickname','role',
-  'group','taskId','taskName','qty','unit','credits',
-  'notes','canvaLink','driveLink',
-  'attachments_count','attachments_links','attachments_names',
-  'entry_id'
-];
-var USER_HEADERS = [
-  'uid','email','nickname','role','kpiSheet',
-  'first_seen','last_seen','entry_count'
-];
-var KPI_HEADERS = [
-  'timestamp','date','group','taskId','taskName',
-  'qty','unit','credits','notes','canvaLink','driveLink',
-  'attachments_count','attachments_links','attachments_names',
-  'entry_id'
-];
-
-function cleanName(v, fallback) {
-  var s = String(v || '').replace(/[\\\\/?*[\\]:]/g, '').trim().replace(/\\s+/g, '_').slice(0, 60);
-  return s || (fallback || 'user');
-}
-
-function getOrCreate(ss, name) {
-  return ss.getSheetByName(name) || ss.insertSheet(name);
-}
-
-function styleHeader(sh, cols, bg, fg) {
-  sh.getRange(1, 1, 1, cols)
-    .setFontWeight('bold').setBackground(bg).setFontColor(fg || '#FFFFFF');
-  sh.setFrozenRows(1);
-}
-
-// ── Ensure system sheets exist ──────────────────────────────
-function ensureConfig(ss) {
-  var sh = getOrCreate(ss, S_CONFIG);
-  if (sh.getLastRow() === 0) {
-    sh.appendRow(['Key', 'Value']);
-    styleHeader(sh, 2, '#2C2A28');
-    sh.appendRow(['version', VERSION]);
-    sh.appendRow(['created_at', new Date().toISOString()]);
-    sh.appendRow(['note', 'Admin-only. Do not share this sheet with regular users.']);
-  }
-  return sh;
-}
-
-function ensureUserRegistry(ss) {
-  var sh = getOrCreate(ss, S_USERS);
-  if (sh.getLastRow() === 0) {
-    sh.appendRow(USER_HEADERS);
-    styleHeader(sh, USER_HEADERS.length, '#F4823C');
-  }
-  return sh;
-}
-
-function ensureAllEntries(ss) {
-  var sh = getOrCreate(ss, S_ENTRIES);
-  if (sh.getLastRow() === 0) {
-    sh.appendRow(ENTRY_HEADERS);
-    styleHeader(sh, ENTRY_HEADERS.length, '#2C2A28');
-    sh.setColumnWidth(1, 160); sh.setColumnWidth(3, 140);
-    sh.setColumnWidth(9, 150); sh.setColumnWidth(17, 220);
-  }
-  return sh;
-}
-
-// ── Per-user KPI sheet ──────────────────────────────────────
-function ensureKpiSheet(ss, sheetName, nickname) {
-  var sh = ss.getSheetByName(sheetName);
-  if (sh) return sh;
-  sh = ss.insertSheet(sheetName);
-  sh.appendRow(KPI_HEADERS);
-  styleHeader(sh, KPI_HEADERS.length, '#1D6F42');
-  sh.getRange('A1').setNote('KPI log for ' + nickname + '. Auto-created by JATRACK.');
-  return sh;
-}
-
-// ── Upsert user registry ────────────────────────────────────
-function upsertUser(sh, uid, email, nickname, role, kpiSheet) {
-  var data = sh.getDataRange().getValues();
-  for (var i = 1; i < data.length; i++) {
-    if (String(data[i][0]) === String(uid)) {
-      sh.getRange(i + 1, 3).setValue(nickname);
-      sh.getRange(i + 1, 7).setValue(new Date().toISOString());
-      sh.getRange(i + 1, 8).setValue(Number(data[i][7] || 0) + 1);
-      return;
-    }
-  }
-  sh.appendRow([uid, email, nickname, role, kpiSheet,
-    new Date().toISOString(), new Date().toISOString(), 1]);
-}
-
-// ── Parse attachments from payload ─────────────────────────
-function parseAtt(d) {
-  var atts = d.attachments;
-  if (!atts || !Array.isArray(atts) || atts.length === 0) {
-    return { count: 0, links: d.driveLink || '', names: '' };
-  }
-  return {
-    count: atts.length,
-    links: atts.map(function(a) { return a.link || ''; }).filter(Boolean).join(' | '),
-    names: atts.map(function(a) {
-      return a.normalizedName || a.originalName || '';
-    }).filter(Boolean).join(' | ')
-  };
-}
-
-// ── Drive folder helpers ────────────────────────────────────
-function getOrCreateFolder(parent, name) {
-  var iter = parent.getFoldersByName(name);
-  return iter.hasNext() ? iter.next() : parent.createFolder(name);
-}
-
-function syncDriveFolders(d) {
-  var rootId = d.rootFolderId;
-  if (!rootId) return { ok: false, error: 'rootFolderId missing' };
-  var root = DriveApp.getFolderById(rootId);
-  var groups = d.groups || [];
-  var created = [];
-  groups.forEach(function(g) {
-    var gName = g.name || g.key;
-    var gFolder = getOrCreateFolder(root, gName);
-    var subs = [];
-    var brands = g.brands || [];
-    if (brands.indexOf('y8') !== -1) { getOrCreateFolder(gFolder, 'Y8'); subs.push('Y8'); }
-    if (brands.indexOf('pv') !== -1) { getOrCreateFolder(gFolder, 'PV'); subs.push('PV'); }
-    created.push(gName + (subs.length ? ' [' + subs.join(', ') + ']' : ''));
-  });
-  return { ok: true, created: created };
-}
-
-function logDeleteUser(d, ss) {
-  var sh = ensureUserRegistry(ss);
-  var data = sh.getDataRange().getValues();
-  for (var i = 1; i < data.length; i++) {
-    if (String(data[i][0]) === String(d.uid)) {
-      sh.getRange(i + 1, 4).setValue('[DELETED] ' + (d.nickname || ''));
-      sh.getRange(i + 1, 7).setValue(new Date().toISOString());
-      return;
-    }
-  }
-}
-
-// ── doGet — health check ────────────────────────────────────
-function doGet() {
-  return ContentService
-    .createTextOutput(JSON.stringify({ ok: true, version: VERSION, service: 'JATRACK GAS v3' }))
-    .setMimeType(ContentService.MimeType.JSON);
-}
-
-// ── doPost — main entry webhook ─────────────────────────────
-function doPost(e) {
-  try {
-    var ss  = SpreadsheetApp.getActiveSpreadsheet();
-    var d   = JSON.parse((e && e.postData && e.postData.contents) || '{}');
-
-    // ── Action routing (v3) ─────────────────────────────────
-    var action = d.action || '';
-    if (action === 'sync_drive_folders') {
-      var folderResult = syncDriveFolders(d);
-      return ContentService
-        .createTextOutput(JSON.stringify(folderResult))
-        .setMimeType(ContentService.MimeType.JSON);
-    }
-    if (action === 'delete_user') {
-      logDeleteUser(d, ss);
-      return ContentService
-        .createTextOutput(JSON.stringify({ ok: true, version: VERSION }))
-        .setMimeType(ContentService.MimeType.JSON);
-    }
-
-    var uid      = String(d.uid || '');
-    var email    = String(d.email || '');
-    var nickname = cleanName(d.nickname || d.name || ('user_' + uid.slice(0, 6)), 'User');
-    var role     = cleanName(d.role || 'member', 'member');
-    var kpiName  = nickname + '_KPI';
-    var att      = parseAtt(d);
-
-    ensureConfig(ss);
-    var userReg    = ensureUserRegistry(ss);
-    var allEntries = ensureAllEntries(ss);
-    var kpiSheet   = ensureKpiSheet(ss, kpiName, nickname);
-
-    upsertUser(userReg, uid, email, nickname, role, kpiName);
-
-    // Write to ALL_ENTRIES (master log)
-    allEntries.appendRow([
-      d.timestamp || new Date().toISOString(), d.date || '', uid, email,
-      nickname, role, d.group || '', d.taskId || '', d.taskName || '',
-      d.quantity || 0, d.unit || '', d.credits || 0, d.notes || '',
-      d.canvaLink || '', d.driveLink || '',
-      att.count, att.links, att.names, d.id || ''
-    ]);
-
-    // Write to per-user KPI sheet
-    kpiSheet.appendRow([
-      d.timestamp || new Date().toISOString(), d.date || '',
-      d.group || '', d.taskId || '', d.taskName || '',
-      d.quantity || 0, d.unit || '', d.credits || 0, d.notes || '',
-      d.canvaLink || '', d.driveLink || '',
-      att.count, att.links, att.names, d.id || ''
-    ]);
-
-    return ContentService
-      .createTextOutput(JSON.stringify({ ok: true, version: VERSION, nickname: nickname, kpiSheet: kpiName }))
-      .setMimeType(ContentService.MimeType.JSON);
-  } catch (err) {
-    return ContentService
-      .createTextOutput(JSON.stringify({ ok: false, error: String(err) }))
-      .setMimeType(ContentService.MimeType.JSON);
-  }
-}
-
-// ── Admin: run once to initialise all sheets ────────────────
-function adminSetup() {
-  var ss = SpreadsheetApp.getActiveSpreadsheet();
-  ensureConfig(ss);
-  ensureUserRegistry(ss);
-  ensureAllEntries(ss);
-  SpreadsheetApp.getUi().alert(
-    '✅ JATRACK v3 Setup Complete!\\n\\n' +
-    'Sheets created:\\n  _CONFIG\\n  _USER_REGISTRY\\n  ALL_ENTRIES\\n\\n' +
-    'New in v3: Drive folder sync + user delete logging.\\n\\n' +
-    'Deploy as Web App → Execute as: Me → Anyone access.\\n' +
-    'Paste the /exec URL into JATRACK app Settings.'
-  );
-}
-
-// ── Admin menu in Google Sheets ─────────────────────────────
-function onOpen() {
-  SpreadsheetApp.getUi()
-    .createMenu('🟠 JATRACK Admin')
-    .addItem('▶ Setup All Sheets', 'adminSetup')
-    .addToUi();
-}
-`;
 
 // ─── MODAL ───────────────────────────────────────────────────────────────────
 const Modal = ({
@@ -1438,7 +1169,6 @@ export default function App() {
   const [isOnline, setIsOnline]             = useState(navigator.onLine);
 
   const [sheetUrl, setSheetUrl]             = useState<string>('');
-  const [geminiApiKey, setGeminiApiKey]     = useState('');
   const [geminiResult, setGeminiResult]     = useState('');
   const [geminiLoading, setGeminiLoading]   = useState(false);
   const [showGemini, setShowGemini]         = useState(false);
@@ -1482,7 +1212,6 @@ export default function App() {
   const [dailyIssueNextStep, setDailyIssueNextStep] = useState('');
 
   // ── Integration states
-  const [sheetsWebhookUrl, setSheetsWebhookUrl] = useState('');
   const [calY8Url, setCalY8Url]               = useState('');
   const [calPvUrl, setCalPvUrl]               = useState('');
   const [driveFolderId, setDriveFolderId]     = useState('');
@@ -1509,8 +1238,6 @@ export default function App() {
   // ── New v3 states
   const [syncQueueCount, setSyncQueueCount]       = useState(0);
   const [customTitleDraft, setCustomTitleDraft]   = useState('');
-  const [showDriveTreeModal, setShowDriveTreeModal] = useState(false);
-  const [driveTreeLoading, setDriveTreeLoading]   = useState(false);
   const [pendingLocalFiles, setPendingLocalFiles] = useState<LocalFileRef[]>([]);
 
   // ── Group expand/collapse + brand/icon management
@@ -1538,13 +1265,9 @@ export default function App() {
       localStorage.getItem(scopedKey(uid, key)) ?? fallback;
 
     setSheetUrl(readSetting('sheet_url', ''));
-    // Always use DEFAULT_GAS_WEBHOOK unless admin has explicitly saved a different one
-    const savedWebhook = readSetting('sheets_webhook', '');
-    setSheetsWebhookUrl(savedWebhook || DEFAULT_GAS_WEBHOOK);
     setCalY8Url(readSetting('cal_y8', ''));
     setCalPvUrl(readSetting('cal_pv', ''));
     setDriveFolderId(readSetting('drive_folder_id', ''));
-    setGeminiApiKey(readSetting('gemini_api_key', ''));
     const savedGender = readSetting('report_gender', 'male');
     setReportGender(savedGender === 'female' ? 'female' : 'male');
     const rawEmojiSettings = readSetting('report_emojis', '');
@@ -1566,9 +1289,12 @@ export default function App() {
   // ── Init syncQueueCount when user changes
   useEffect(() => {
     if (!currentUser) { setSyncQueueCount(0); return; }
-    setSyncQueueCount(getWebhookQueue().length);
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+    setSyncQueueCount(0);
   }, [currentUser]);
+
+  useEffect(() => {
+    setSyncQueueCount(entries.filter((entry) => entry.sheetSync?.status && entry.sheetSync.status !== 'synced').length);
+  }, [entries]);
 
   // ── Sync customTitleDraft when Settings opens
   useEffect(() => {
@@ -1585,44 +1311,6 @@ export default function App() {
   const showToast = (message: string) => {
     setToast({ show: true, message });
     setTimeout(() => setToast({ show: false, message: '' }), 2500);
-  };
-
-  const getWebhookQueue = (): Record<string, unknown>[] => {
-    if (!currentUser) return [];
-    const raw = localStorage.getItem(scopedKey(currentUser.uid, 'webhook_queue'));
-    if (!raw) return [];
-    try { return JSON.parse(raw) as Record<string, unknown>[]; }
-    catch { return []; }
-  };
-
-  const setWebhookQueue = (rows: Record<string, unknown>[]) => {
-    if (!currentUser) return;
-    localStorage.setItem(scopedKey(currentUser.uid, 'webhook_queue'), JSON.stringify(rows));
-  };
-
-  const enqueueWebhook = (payload: Record<string, unknown>) => {
-    const queue = getWebhookQueue();
-    queue.push(payload);
-    const trimmed = queue.slice(-200);
-    setWebhookQueue(trimmed);
-    setSyncQueueCount(trimmed.length);
-  };
-
-  const postSheetsWebhook = async (payload: Record<string, unknown>) => {
-    if (!sheetsWebhookUrl) return false;
-    const body = JSON.stringify(payload);
-    const isAppsScript = /script\.google\.com\/macros\/s\//.test(sheetsWebhookUrl);
-    if (isAppsScript && typeof navigator !== 'undefined' && typeof navigator.sendBeacon === 'function') {
-      const blob = new Blob([body], { type: 'text/plain;charset=utf-8' });
-      return navigator.sendBeacon(sheetsWebhookUrl, blob);
-    }
-    await fetch(sheetsWebhookUrl, {
-      method: 'POST',
-      mode: 'no-cors',
-      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-      body,
-    });
-    return true;
   };
 
   // ── Firebase Auth listener (Phase 3)
@@ -1671,7 +1359,6 @@ export default function App() {
             if (s.sheetUrl)       setSheetUrl(s.sheetUrl);
             if (s.reportGender)   setReportGender(s.reportGender);
             if (s.reportEmojis)   setReportEmojis({ ...DEFAULT_REPORT_EMOJIS, ...s.reportEmojis });
-            if (isSuperAdmin && s.sheetsWebhookUrl) setSheetsWebhookUrl(s.sheetsWebhookUrl);
           }
 
           if (
@@ -2351,80 +2038,6 @@ export default function App() {
     }
   };
 
-  // ── Sheets Auto-Push (Apps Script friendly)
-  const pushToSheetsWebhook = (entry: WorkEntry) => {
-    if (!sheetsWebhookUrl) return;
-    const task = kpiConfig[entry.groupId]?.tasks.find(t => t.id === entry.taskId);
-    const nickname = (userProfile?.nickname || displayName).trim();
-    const sheets = buildSheetNames(nickname, currentUser?.uid);
-    const payload: Record<string, unknown> = {
-      // New payload
-      date:      entry.date,
-      name:      entry.userName || displayName,
-      group:     kpiConfig[entry.groupId]?.name || entry.groupId,
-      taskId:    entry.taskId,
-      taskName:  task?.name || '',
-      quantity:  entry.quantity,
-      unit:      task?.unit || '',
-      credits:   entry.credits,
-      notes:     entry.notes,
-      canvaLink: entry.canvaLink || '',
-      driveLink: entry.driveLink || (entry.attachments?.[0]?.link ?? ''),
-      uid:       currentUser?.uid || '',
-      email:     normalizeEmail(currentUser?.email),
-      nickname,
-      role:      userProfile?.role || 'custom',
-      timestamp: new Date().toISOString(),
-      // Multi-file attachments (GAS v2)
-      attachments:      entry.attachments || [],
-      attachmentsCount: entry.attachments?.length ?? 0,
-      attachmentsLinks: entry.attachments?.map(a => a.link).join(' | ') ?? (entry.driveLink || ''),
-      attachmentsNames: entry.attachments?.map(a => a.normalizedName).join(' | ') ?? '',
-      // Backward-compatible fields (for legacy consumers)
-      id:        entry.id,
-      user:      entry.userName || displayName,
-      groupName: kpiConfig[entry.groupId]?.name || entry.groupId,
-      channel:   task?.channel || '',
-      ownerKey:  sheets.ownerKey,
-      masterSheetName:    sheets.masterSheetName,
-      dashboardSheetName: sheets.dashboardSheetName,
-    };
-
-    if (!isOnline) {
-      enqueueWebhook(payload);
-      showToast('บันทึกแล้ว (คิวส่งชีตหลังออนไลน์)');
-      return;
-    }
-
-    void postSheetsWebhook(payload).catch(() => {
-      enqueueWebhook(payload);
-      showToast('บันทึกแล้ว (ส่งชีตไม่สำเร็จ, เข้า Queue)');
-    });
-  };
-
-  useEffect(() => {
-    if (!currentUser || !sheetsWebhookUrl || !isOnline) return;
-    const queue = getWebhookQueue();
-    if (!queue.length) return;
-
-    const flush = async () => {
-      const remaining: Record<string, unknown>[] = [];
-      for (const payload of queue) {
-        try {
-          const ok = await postSheetsWebhook(payload);
-          if (!ok) remaining.push(payload);
-        } catch {
-          remaining.push(payload);
-        }
-      }
-      setWebhookQueue(remaining);
-      setSyncQueueCount(remaining.length);
-      if (remaining.length === 0) showToast('ส่งข้อมูลค้างไปชีตเรียบร้อย ✓');
-    };
-
-    void flush();
-  }, [currentUser, sheetsWebhookUrl, isOnline]);
-
   // ── Ordered group keys — always sorted alphabetically (A → B → C → D)
   const orderedGroupKeys = useMemo(
     () => Object.keys(kpiConfig).sort(),
@@ -2436,20 +2049,7 @@ export default function App() {
     if (uid === currentUser?.uid) { showToast('ไม่สามารถลบตัวเองได้'); return; }
     if (!window.confirm(`ลบผู้ใช้ "${nickname}" ออกจากระบบ?\n\nข้อมูลทั้งหมดจะถูกลบถาวร\n(Firebase Auth ยังอยู่ แต่ไม่มีข้อมูลใดๆ)`)) return;
     try {
-      // 1. ลบ entries subcollection
-      const entriesSnap = await getDocs(collection(db, 'users', uid, 'entries'));
-      await Promise.all(entriesSnap.docs.map(d => deleteDoc(d.ref)));
-      // 2. ลบ kpiConfig
-      await deleteDoc(doc(db, 'kpiConfigs', uid));
-      // 3. ลบ user profile doc
-      await deleteDoc(doc(db, 'users', uid));
-      // 4. Fire webhook notification
-      if (sheetsWebhookUrl) {
-        void postSheetsWebhook({
-          action: 'delete_user', uid, nickname,
-          timestamp: new Date().toISOString(),
-        }).catch(() => {});
-      }
+      await adminDeleteUserCallable({ uid });
       showToast(`ลบผู้ใช้ "${nickname}" แล้ว ✓`);
     } catch (err) {
       showToast('เกิดข้อผิดพลาด: ' + (err as Error).message);
@@ -2468,6 +2068,11 @@ export default function App() {
     currentUser?.displayName ||
     currentUser?.email?.split('@')[0] ||
     'User';
+
+  const latestSyncState = useMemo(() => {
+    const sorted = [...entries].sort((a, b) => Number(b.updatedAt || b.createdAt || 0) - Number(a.updatedAt || a.createdAt || 0));
+    return sorted.find((entry) => entry.sheetSync)?.sheetSync || null;
+  }, [entries]);
 
   const updateDailyListItem = (
     setter: React.Dispatch<React.SetStateAction<string[]>>,
@@ -2814,18 +2419,34 @@ export default function App() {
   // ── CRUD handlers
   const handleAddEntry = async () => {
     if (!currentUser || !currentTask) return;
+    const now = Date.now();
     const id = crypto.randomUUID ? crypto.randomUUID() : Math.random().toString(36).substr(2, 9);
     const newEntry: WorkEntry = {
       id,
       date:      selectedDate,
       user:      currentUser.uid,
       userName:  displayName,
+      email:     normalizeEmail(currentUser.email),
+      role:      userProfile?.customTitle || String(userProfile?.role || 'custom'),
       groupId:   selectedGroup,
+      groupName: kpiConfig[selectedGroup]?.name || selectedGroup,
       taskId:    selectedTaskId,
+      taskName:  currentTask.name,
       quantity,
+      unit:      currentTask.unit,
+      creditPerUnit: currentTask.creditPerUnit,
+      brands:    currentTask.brands || kpiConfig[selectedGroup]?.brands || [],
       credits:   quantity * currentTask.creditPerUnit,
       notes,
-      createdAt: Date.now(),
+      createdAt: now,
+      updatedAt: now,
+      channel:   currentTask.channel,
+      sheetSync: {
+        status: 'pending',
+        action: 'create',
+        lastAttemptedAt: now,
+        revision: 0,
+      },
       ...(canvaLink.trim() ? { canvaLink: canvaLink.trim() } : {}),
       ...(driveLink.trim() || logAttachments[0]?.link
         ? { driveLink: driveLink.trim() || logAttachments[0].link }
@@ -2843,7 +2464,6 @@ export default function App() {
       setDriveLink('');
       setLogAttachments([]);
       setPendingLocalFiles([]);
-      pushToSheetsWebhook(newEntry);
     } catch (e) {
       console.error(e);
       showToast('❌ บันทึกไม่สำเร็จ');
@@ -2856,7 +2476,27 @@ export default function App() {
     if (!editEntry || !currentUser) return;
     const task = kpiConfig[editEntry.groupId]?.tasks.find((t) => t.id === editEntry.taskId);
     if (!task) return;
-    const updated = { ...editEntry, credits: editEntry.quantity * task.creditPerUnit };
+    const updatedAt = Date.now();
+    const updated = {
+      ...editEntry,
+      email: normalizeEmail(currentUser.email),
+      userName: displayName,
+      role: userProfile?.customTitle || String(userProfile?.role || 'custom'),
+      groupName: kpiConfig[editEntry.groupId]?.name || editEntry.groupId,
+      taskName: task.name,
+      unit: task.unit,
+      creditPerUnit: task.creditPerUnit,
+      brands: task.brands || kpiConfig[editEntry.groupId]?.brands || [],
+      channel: task.channel,
+      credits: editEntry.quantity * task.creditPerUnit,
+      updatedAt,
+      sheetSync: {
+        status: 'pending' as const,
+        action: 'update' as const,
+        lastAttemptedAt: updatedAt,
+        revision: editEntry.sheetSync?.revision || 0,
+      },
+    };
     setIsLoading(true);
     try {
       await setDoc(doc(db, 'users', currentUser.uid, 'entries', updated.id), updated);
@@ -3028,36 +2668,18 @@ export default function App() {
 
   // ── Gemini AI Summary
   const handleGeminiSummary = async () => {
-    if (!geminiApiKey.trim()) { showToast('ใส่ Gemini API Key ใน Settings ก่อน'); return; }
     setGeminiLoading(true);
     setGeminiResult('');
     setShowGemini(true);
     try {
-      const monthName = getMonthNameThai(summaryMonth);
-      const role = userProfile ? (ROLE_DEFAULTS[userProfile.role]?.meta.label || userProfile.role) : '';
-      const groupLines = summaryData.groups.map(g =>
-        `  - ${g.name}: ${g.credits} Credits`
-      ).join('\n');
-      const prompt =
-        `คุณเป็น KPI Analyst ผู้เชี่ยวชาญ วิเคราะห์ผลการทำงาน KPI ต่อไปนี้และสรุปเป็น**ภาษาไทย** สั้น ชัด อ่านง่าย ใน 3-5 ประโยค:\n\n` +
-        `ชื่อ: ${displayName} | ตำแหน่ง: ${role}\n` +
-        `เดือน: ${monthName} ${summaryYear}\n` +
-        `ผลรวม: ${summaryData.totalCredits} / ${monthlyTarget} Credits (${Math.round(summaryData.percent)}%)\n` +
-        `จำนวนงาน: ${summaryData.entryCount} รายการ\n` +
-        `แยกตามกลุ่ม:\n${groupLines || '  (ยังไม่มีข้อมูล)'}`;
-
-      const res = await fetch(
-        `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${geminiApiKey.trim()}`,
-        {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] }),
-        }
-      );
-      const data = await res.json() as { candidates?: Array<{ content: { parts: Array<{ text: string }> } }> };
-      setGeminiResult(data.candidates?.[0]?.content?.parts?.[0]?.text || 'ไม่สามารถสรุปได้ในขณะนี้');
+      const data = await generateMonthlySummaryCallable({
+        uid: currentUser?.uid || '',
+        month: summaryMonth,
+        year: summaryYear,
+      });
+      setGeminiResult(data.summary || 'ไม่สามารถสรุปได้ในขณะนี้');
     } catch {
-      setGeminiResult('❌ เชื่อมต่อ Gemini ไม่สำเร็จ ตรวจสอบ API Key และการเชื่อมต่ออินเทอร์เน็ต');
+      setGeminiResult('❌ ไม่สามารถสร้างสรุปผ่าน backend ได้ในขณะนี้');
     } finally {
       setGeminiLoading(false);
     }
@@ -3176,18 +2798,20 @@ export default function App() {
     setShowExportModal(false);
   };
 
+  const viewState = resolveAppViewState({ authLoading, profileLoading, currentUser, userProfile });
+
   // ── Render guards
-  if (authLoading || profileLoading) return <LoadingScreen />;
-  if (!currentUser) return <SignInScreen onSignIn={handleSignIn} loading={signInLoading} toast={toast} />;
-  if (!userProfile) return <LoadingScreen />;
-  if (!userProfile.nickname?.trim()) {
+  if (viewState === 'loading') return <AuthLoadingScreen />;
+  if (viewState === 'signin') return <AuthSignInScreen onSignIn={handleSignIn} loading={signInLoading} toast={toast} ToastComponent={Toast} />;
+  if (viewState === 'nickname') {
     return (
-      <NicknameSetupScreen
+      <AuthNicknameSetupScreen
         defaultValue={currentUser.displayName?.split(' ')[0] || ''}
         onSave={handleSaveNickname}
       />
     );
   }
+  if (!currentUser || !userProfile) return <AuthLoadingScreen />;
 
   const todayEntries   = entries.filter((e) => e.user === currentUser.uid && e.date === getTodayStr());
   const historyEntries = entries.filter((e) => e.user === currentUser.uid);
@@ -3550,40 +3174,40 @@ export default function App() {
             />
           </div>
 
-          {/* Sheets Auto-Push — status for all / edit for admin */}
+          {/* Backend sync status */}
           <div className="space-y-1.5">
             <label className="text-[10px] font-bold text-slate-400 tracking-widest uppercase">
-              Sheets Auto-Push <span className="font-normal normal-case">(Google Apps Script)</span>
+              Sheets Sync Backend
             </label>
-            {isSuperAdmin ? (
-              <>
-                <input
-                  type="text"
-                  value={sheetsWebhookUrl}
-                  onChange={(e) => setSheetsWebhookUrl(e.target.value)}
-                  className="w-full px-4 py-3.5 bg-slate-50 border border-slate-100 rounded-2xl text-[12px] outline-none"
-                  placeholder="https://script.google.com/macros/s/..."
-                />
-                <button
-                  onClick={() => {
-                    navigator.clipboard.writeText(GAS_TEMPLATE).then(() => showToast('คัดลอก GAS Template v3 แล้ว ✓'));
-                  }}
-                  className="w-full py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-[11px] font-bold text-slate-500 flex items-center justify-center gap-1.5 active:bg-orange-50 transition-colors"
-                >
-                  📋 Copy GAS Template v3 (Apps Script)
-                </button>
-              </>
-            ) : (
-              <div className={`px-4 py-3 rounded-2xl border flex items-center gap-2.5 ${sheetsWebhookUrl ? 'bg-emerald-50 border-emerald-100' : 'bg-slate-50 border-slate-100'}`}>
-                <span className="text-[15px]">{sheetsWebhookUrl ? '✅' : '⏸'}</span>
-                <div>
-                  <p className={`text-[11px] font-bold ${sheetsWebhookUrl ? 'text-emerald-700' : 'text-slate-500'}`}>
-                    {sheetsWebhookUrl ? 'เชื่อมต่อ Google Sheets แล้ว' : 'ยังไม่ได้ตั้งค่า Webhook'}
-                  </p>
-                  <p className="text-[9px] text-slate-400">ตั้งค่าโดย Admin · ไม่ต้องดำเนินการเพิ่มเติม</p>
-                </div>
+            <div className={`px-4 py-3 rounded-2xl border flex items-center gap-2.5 ${
+              latestSyncState?.status === 'failed'
+                ? 'bg-rose-50 border-rose-100'
+                : latestSyncState?.status === 'pending'
+                  ? 'bg-amber-50 border-amber-100'
+                  : 'bg-emerald-50 border-emerald-100'
+            }`}>
+              <span className="text-[15px]">
+                {latestSyncState?.status === 'failed' ? '⚠️' : latestSyncState?.status === 'pending' ? '⏳' : '✅'}
+              </span>
+              <div>
+                <p className={`text-[11px] font-bold ${
+                  latestSyncState?.status === 'failed'
+                    ? 'text-rose-700'
+                    : latestSyncState?.status === 'pending'
+                      ? 'text-amber-700'
+                      : 'text-emerald-700'
+                }`}>
+                  {latestSyncState?.status === 'failed'
+                    ? 'Backend sync มีปัญหา'
+                    : latestSyncState?.status === 'pending'
+                      ? 'กำลัง sync ไป Google Sheets'
+                      : 'Backend sync พร้อมใช้งาน'}
+                </p>
+                <p className="text-[9px] text-slate-400">
+                  {latestSyncState?.lastError || 'ระบบใช้ Firestore เป็น source of truth และ sync ผ่าน Cloud Functions'}
+                </p>
               </div>
-            )}
+            </div>
           </div>
 
           {/* Google Drive Attachment */}
@@ -3709,31 +3333,8 @@ export default function App() {
             <Sliders size={15} /> จัดการ KPI Config (Role ของฉัน)
           </button>
 
-          {/* Drive folder manager button */}
-          {driveFolderId.trim() && (
-            <button
-              onClick={() => setShowDriveTreeModal(true)}
-              className="w-full py-3.5 bg-slate-50 border border-slate-200 rounded-2xl font-bold text-[13px] text-[#2C2A28] flex items-center justify-center gap-2.5 active:bg-green-50 transition-colors"
-            >
-              <FolderOpen size={15} /> จัดการโฟลเดอร์ Drive
-            </button>
-          )}
-
-          {/* Gemini API Key */}
-          <div className="space-y-1.5">
-            <label className="text-[10px] font-bold tracking-widest uppercase" style={{ color: '#7C3AED' }}>
-              🤖 Gemini API Key (สำหรับ AI Summary)
-            </label>
-            <input
-              type="password"
-              value={geminiApiKey}
-              onChange={(e) => setGeminiApiKey(e.target.value)}
-              className="w-full px-4 py-3.5 bg-slate-50 border border-slate-100 rounded-2xl text-[12px] outline-none"
-              placeholder="AIza... (จาก Google AI Studio)"
-            />
-            <p className="text-[10px] text-slate-400">
-              รับฟรีที่ <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener noreferrer" className="underline text-violet-500">aistudio.google.com/apikey</a>
-            </p>
+          <div className="px-4 py-2.5 rounded-2xl bg-violet-50 border border-violet-100 text-[11px] text-violet-700">
+            AI Summary ถูกย้ายไปประมวลผลบน backend แล้ว จึงไม่ต้องเก็บ API key ไว้ในอุปกรณ์ผู้ใช้อีกต่อไป
           </div>
 
           {/* ── Auto-hover toggle */}
@@ -3767,11 +3368,6 @@ export default function App() {
                 const ok = await handleSaveNickname(nicknameDraft);
                 if (!ok) return;
                 localStorage.setItem(scopedKey(currentUser.uid, 'sheet_url'), sheetUrl.trim());
-                // Only super admin can override the webhook URL
-                if (isSuperAdmin) {
-                  localStorage.setItem(scopedKey(currentUser.uid, 'sheets_webhook'), sheetsWebhookUrl.trim());
-                }
-                localStorage.setItem(scopedKey(currentUser.uid, 'gemini_api_key'), geminiApiKey.trim());
                 localStorage.setItem(scopedKey(currentUser.uid, 'report_gender'), reportGender);
                 localStorage.setItem(scopedKey(currentUser.uid, 'report_emojis'), JSON.stringify(reportEmojis));
                 // ── Persist settings + customTitle to Firestore
@@ -3787,14 +3383,13 @@ export default function App() {
                       sheetUrl:      sheetUrl.trim(),
                       reportGender,
                       reportEmojis,
-                      ...(isSuperAdmin ? { sheetsWebhookUrl: sheetsWebhookUrl.trim() } : {}),
                     },
                     updatedAt: Date.now(),
                   }, { merge: true });
                   setUserProfile(prev => prev ? { ...prev, customTitle: titleVal || undefined,
                     settings: { autoHoverExpand, calY8Url: calY8Url.trim(), calPvUrl: calPvUrl.trim(),
                       driveFolderId: driveFolderId.trim(), sheetUrl: sheetUrl.trim(), reportGender, reportEmojis,
-                      ...(isSuperAdmin ? { sheetsWebhookUrl: sheetsWebhookUrl.trim() } : {}) } } : prev);
+                    } } : prev);
                 } catch { /* non-critical */ }
                 setShowSettings(false);
                 showToast('บันทึก Config แล้ว');
@@ -4787,90 +4382,6 @@ export default function App() {
           </div>
         );
       })()}
-
-      {/* ─── DRIVE FOLDER TREE MODAL ────────────────────────────────────────── */}
-      <Modal isOpen={showDriveTreeModal} onClose={() => setShowDriveTreeModal(false)} title="📁 โครงสร้างโฟลเดอร์ Drive">
-        <div className="px-6 pb-8 space-y-4 overflow-y-auto">
-          <p className="text-[11px] text-slate-400">โครงสร้างโฟลเดอร์ใน Google Drive — ไฟล์ที่อัปโหลดจะถูกจัดเรียงตามกลุ่มงาน/แบรนด์/เดือนโดยอัตโนมัติ:</p>
-
-          {/* Tree preview */}
-          <div className="bg-slate-50 rounded-2xl p-4 font-mono text-[11px] space-y-1 overflow-x-auto">
-            <p className="font-bold text-[#2C2A28]">📁 Drive Root</p>
-            {orderedGroupKeys.map((key, i) => {
-              const grp    = kpiConfig[key];
-              const isLast = i === orderedGroupKeys.length - 1;
-              const hasY8  = grp.brands?.includes('y8');
-              const hasPv  = grp.brands?.includes('pv');
-              const singleBrand = (hasY8 && !hasPv) ? 'Y8' : (!hasY8 && hasPv) ? 'PV' : null;
-              // When single brand: Root → Group → Brand → YYYY-MM
-              // When multi/no brand: Root → Group → YYYY-MM
-              const monthExample = `${new Date().getFullYear()}-${String(new Date().getMonth() + 1).padStart(2, '0')}`;
-              return (
-                <div key={key} className="ml-3">
-                  <p className="text-slate-600">{isLast ? '└──' : '├──'} 📁 {grp.name}</p>
-                  {singleBrand ? (
-                    // Single brand: Group → Brand → YYYY-MM
-                    <div className="ml-6">
-                      <p className="text-slate-500">└── 📁 {singleBrand}</p>
-                      <div className="ml-6">
-                        <p className="text-slate-400">└── 📁 {monthExample} <span className="text-slate-300">(สร้างอัตโนมัติเมื่ออัปโหลด)</span></p>
-                      </div>
-                    </div>
-                  ) : (
-                    // Multi/no brand: Group → YYYY-MM (+ show brand folders if both)
-                    <>
-                      {hasY8 && <p className="ml-6 text-slate-500">{hasPv ? '├──' : '└──'} 📁 Y8</p>}
-                      {hasPv && <p className="ml-6 text-slate-500">├── 📁 PV</p>}
-                      <div className="ml-6">
-                        <p className="text-slate-400">{(hasY8 || hasPv) ? '└──' : '└──'} 📁 {monthExample} <span className="text-slate-300">(สร้างอัตโนมัติเมื่ออัปโหลด)</span></p>
-                      </div>
-                    </>
-                  )}
-                </div>
-              );
-            })}
-          </div>
-
-          {/* Info note */}
-          <div className="space-y-2">
-            <div className="bg-sky-50 border border-sky-100 rounded-xl p-3 text-[10px] text-sky-700 leading-relaxed">
-              ℹ️ ไฟล์ที่อัปโหลดจะถูกจัดเก็บตาม: <strong>กลุ่มงาน → แบรนด์ (ถ้ามีแบรนด์เดียว) → เดือน (YYYY-MM)</strong>
-            </div>
-            <div className="bg-amber-50 border border-amber-100 rounded-xl p-3 text-[10px] text-amber-700 leading-relaxed">
-              ⚠️ ปุ่มยืนยันด้านล่างสร้างโครงสร้างหลักผ่าน GAS — โฟลเดอร์ YYYY-MM จะสร้างอัตโนมัติตอนอัปโหลดไฟล์ โฟลเดอร์เดิมและไฟล์จะไม่ถูกลบ
-            </div>
-          </div>
-
-          {/* Confirm button */}
-          <button
-            disabled={driveTreeLoading}
-            onClick={async () => {
-              setDriveTreeLoading(true);
-              try {
-                await postSheetsWebhook({
-                  action: 'sync_drive_folders',
-                  rootFolderId: driveFolderId.trim(),
-                  groups: orderedGroupKeys.map(k => ({
-                    key: k,
-                    name: kpiConfig[k].name,
-                    brands: kpiConfig[k].brands || [],
-                    icon: kpiConfig[k].icon || k,
-                  })),
-                });
-                showToast('ส่งคำสั่งสร้างโฟลเดอร์ไปยัง GAS แล้ว ✓');
-                setShowDriveTreeModal(false);
-              } catch {
-                showToast('เกิดข้อผิดพลาด กรุณาลองใหม่');
-              }
-              setDriveTreeLoading(false);
-            }}
-            className="w-full py-4 text-white rounded-2xl font-bold text-[13px] glow-orange disabled:opacity-60 transition-opacity active:opacity-80"
-            style={{ background: 'linear-gradient(135deg, #1D6F42, #2EA84B)' }}
-          >
-            {driveTreeLoading ? 'กำลังส่ง...' : '✅ ยืนยันสร้าง/อัปเดตโฟลเดอร์'}
-          </button>
-        </div>
-      </Modal>
 
       {/* ─── BOTTOM NAV ─────────────────────────────────────────────────────── */}
       <nav className="fixed bottom-0 left-0 right-0 max-w-md mx-auto bg-white/95 backdrop-blur-xl border-t border-slate-100/80 z-[60] shadow-2xl flex flex-col items-center">

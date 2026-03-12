@@ -21,15 +21,20 @@
     "jsx": "react-jsx",
     "paths": {
       "@/*": [
-        "./*"
+        "./src/*"
       ]
     },
     "allowImportingTsExtensions": true,
     "noEmit": true
   },
+  "include": [
+    "src/**/*",
+    "vite.config.ts"
+  ],
   "exclude": [
     "jatrack-daily",
     "dist",
-    "node_modules"
+    "node_modules",
+    "functions"
   ]
 }

@@ -5,7 +5,7 @@
  * After that, edits are saved to Firestore and loaded from there.
  */
 
-import { RoleConfig, RoleId } from './types';
+import type { RoleConfig, RoleId } from '@/domain/types';
 
 // ─── ART DIRECTOR (ปัจจุบัน = ข้อมูลของ constants.ts เดิม) ──────────────────
 

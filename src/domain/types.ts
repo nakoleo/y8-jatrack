@@ -48,11 +48,24 @@ export interface LocalFileRef {
   idbKey:       string;    // key ใน IndexedDB สำหรับดึง FileSystemFileHandle กลับมา
 }
 
+export type EntrySyncAction = 'create' | 'update' | 'delete';
+export type SheetSyncStatus = 'pending' | 'synced' | 'failed';
+
+export interface SheetSyncState {
+  status: SheetSyncStatus;
+  action?: EntrySyncAction;
+  lastAttemptedAt?: number;
+  lastSuccessAt?: number;
+  lastError?: string;
+  revision?: number;
+}
+
 export interface WorkEntry {
   id: string;
   date: string;
   user: string;        // Firebase UID
   userName?: string;   // Display name (for export)
+  email?: string;      // Email snapshot at time of entry
   role?: string;       // Role at time of entry
   groupId: string;
   groupName?: string;  // Group label at time of entry
@@ -65,11 +78,13 @@ export interface WorkEntry {
   credits: number;
   notes: string;
   createdAt: number;
+  updatedAt?: number;
   channel?: string;    // Channel metadata at time of entry
   canvaLink?:    string;              // Canva presentation/board URL
   driveLink?:    string;              // Drive link (backward compat / manual paste)
   attachments?:  DriveAttachment[];   // Multi-file Drive uploads
   localFiles?:   LocalFileRef[];      // Local file references (File System Access API)
+  sheetSync?:    SheetSyncState;
 }
 
 // ─── ROLE SYSTEM ──────────────────────────────────────────────────────────────
@@ -115,7 +130,6 @@ export interface UserProfile {
     calPvUrl?: string;
     driveFolderId?: string;
     sheetUrl?: string;
-    sheetsWebhookUrl?: string;
     reportGender?: 'male' | 'female';
     reportEmojis?: {
       focus?: string;

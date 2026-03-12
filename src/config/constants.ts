@@ -1,5 +1,5 @@
 
-import { WorkGroup } from './types';
+import type { WorkGroup } from '@/domain/types';
 
 export const MONTHLY_TARGET = 300;
 export const MONTHLY_PLAN = 317;

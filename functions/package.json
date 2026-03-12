@@ -1,0 +1,23 @@
+{
+  "name": "jatrack-functions",
+  "private": true,
+  "main": "lib/index.js",
+  "type": "module",
+  "engines": {
+    "node": "20"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "vitest run --config vitest.config.ts"
+  },
+  "dependencies": {
+    "firebase-admin": "^12.7.0",
+    "firebase-functions": "^6.2.1",
+    "googleapis": "^144.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.14.0",
+    "typescript": "~5.8.2",
+    "vitest": "^3.2.4"
+  }
+}
