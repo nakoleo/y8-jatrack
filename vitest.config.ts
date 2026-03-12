@@ -6,6 +6,6 @@ export default defineConfig({
     globals: true,
     setupFiles: ['./src/test/setup.ts'],
     include: ['src/**/*.test.ts', 'src/**/*.test.tsx'],
-    exclude: ['functions/**/*', 'jatrack-daily/**/*', 'dist/**/*'],
+    exclude: ['functions/**/*', 'archive/**/*', 'dist/**/*'],
   },
 });

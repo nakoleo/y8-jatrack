@@ -39,10 +39,12 @@ KPI tracking app for Y8/PV teams (mobile-first, Firebase + Google integrations).
 - `src/domain` - shared app types
 - `src/lib` - Firebase client and frontend service wrappers
 - `src/styles` - global styles
+- `docs` - handoff notes and project documentation
+- `archive` - legacy sandboxes and retired experiments
 - `functions/src` - Firebase Functions backend and Google Sheets sync
 - `functions/test` - backend test coverage
 
-Legacy sandbox code remains under `jatrack-daily/` and is excluded from app build/tests.
+Legacy sandbox code remains under `archive/jatrack-daily/` and is excluded from app build/tests.
 
 ## Local setup
 

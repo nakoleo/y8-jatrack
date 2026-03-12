@@ -19,6 +19,12 @@ import {
 import { db, auth, googleProvider, createDriveProvider, firebaseApp } from '../lib/firebase/client';
 import { adminDeleteUser as adminDeleteUserCallable, generateMonthlySummary as generateMonthlySummaryCallable } from '../lib/functionsClient';
 import { LoadingScreen as AuthLoadingScreen, NicknameSetupScreen as AuthNicknameSetupScreen, SignInScreen as AuthSignInScreen } from '../features/auth/screens';
+import { AdminTab } from '../features/tabs/AdminTab';
+import { DailyTab } from '../features/tabs/DailyTab';
+import { HistoryTab } from '../features/tabs/HistoryTab';
+import { LogTab } from '../features/tabs/LogTab';
+import { SummaryTab } from '../features/tabs/SummaryTab';
+import { TodayTab } from '../features/tabs/TodayTab';
 import { resolveAppViewState } from './viewState';
 import { WORK_GROUPS } from '@/config/constants';
 import type { WorkEntry, WorkGroup, WorkGroups, TabType, UserProfile, RoleId, DriveAttachment, LocalFileRef, DailyReport, DailyReportType } from '@/domain/types';
@@ -3458,842 +3464,147 @@ export default function App() {
       {/* ─── MAIN CONTENT ───────────────────────────────────────────────────── */}
       <main className="flex-1 overflow-y-auto px-5 py-5 pb-[calc(7rem+env(safe-area-inset-bottom))]" style={{ WebkitOverflowScrolling: 'touch' } as React.CSSProperties}>
 
-        {/* LOG TAB */}
         {activeTab === 'log' && (
-          <div className="space-y-4 animate-in fade-in slide-in-from-bottom-2 duration-300">
-            <section className="bg-white p-5 rounded-[24px] shadow-sm border border-slate-100/80">
-              <div className="flex items-center gap-2 mb-5">
-                <CalendarIcon size={14} className="text-slate-300" />
-                <h3 className="font-bold text-[#2C2A28] text-[11px] uppercase tracking-widest">บันทึกงานใหม่</h3>
-              </div>
-
-              <div className="space-y-4">
-                {/* Date */}
-                <div className="space-y-1.5">
-                  <label className="text-[9px] font-bold text-slate-400 uppercase tracking-widest">วันที่</label>
-                  <input
-                    type="date"
-                    value={selectedDate}
-                    onChange={(e) => setSelectedDate(e.target.value)}
-                    className="w-full px-4 py-3 bg-[#FDFAF7] border border-slate-200 rounded-xl font-semibold text-[#2C2A28] text-[13px] outline-none"
-                  />
-                </div>
-
-                {/* Group + Task — Expand/Collapse with animation */}
-                <div className="space-y-2">
-                  <label className="text-[9px] font-bold text-slate-400 uppercase tracking-widest">กลุ่มงาน</label>
-                  <div className="space-y-2">
-                    {orderedGroupKeys.map((key) => {
-                      const grp        = kpiConfig[key];
-                      const isActive   = selectedGroup === key;
-                      const isExpanded = expandedGroups.has(key) || (autoHoverExpand && hoveredGroup === key);
-                      const hasY8 = grp.brands?.includes('y8');
-                      const hasPv = grp.brands?.includes('pv');
-                      const brandLabel = hasY8 && hasPv ? 'Y8-PV' : hasY8 ? 'Y8' : hasPv ? 'PV' : null;
-                      const brandBg    = hasY8 && hasPv ? 'linear-gradient(90deg,#FEF3E2,#FDE8F2)' : hasY8 ? '#FEF3E2' : '#FDE8F2';
-                      const brandColor = hasY8 && hasPv ? '#9D5C1A' : hasY8 ? '#F4823C' : '#E87AA5';
-                      return (
-                        <div key={key}
-                          className="rounded-[16px] overflow-hidden border transition-all duration-200"
-                          style={{ borderColor: isActive ? grp.color : 'rgb(241 245 249)', background: isActive ? grp.bg : 'white' }}
-                          onMouseEnter={() => autoHoverExpand && setHoveredGroup(key)}
-                          onMouseLeave={() => autoHoverExpand && setHoveredGroup(null)}
-                        >
-                          {/* Group header — click = toggle expand + set selectedGroup */}
-                          <button className="w-full flex items-center gap-2 px-3 py-2.5 text-left"
-                            onClick={() => {
-                              setSelectedGroup(key);
-                              setSelectedTaskId(grp.tasks[0]?.id || '');
-                              setExpandedGroups(prev => {
-                                const s = new Set(prev);
-                                s.has(key) ? s.delete(key) : s.add(key);
-                                return s;
-                              });
-                            }}
-                          >
-                            <span className="w-7 h-7 rounded-xl flex items-center justify-center text-white text-[11px] font-black shrink-0"
-                              style={{ background: grp.color }}>
-                              {grp.icon || key.slice(0, 1)}
-                            </span>
-                            <div className="flex-1 min-w-0">
-                              <div className="flex items-center gap-1.5">
-                                <p className="text-[12px] font-bold text-[#2C2A28] truncate">{grp.name}</p>
-                                {brandLabel && (
-                                  <span className="text-[7px] px-1.5 py-0.5 rounded font-bold shrink-0"
-                                    style={{ background: brandBg, color: brandColor }}>
-                                    {brandLabel}
-                                  </span>
-                                )}
-                              </div>
-                              <p className="text-[9px] text-slate-400">{grp.tasks.length} งาน</p>
-                            </div>
-                            <ChevronDown size={14}
-                              className="text-slate-300 shrink-0 transition-transform duration-200"
-                              style={{ transform: isExpanded ? 'rotate(180deg)' : 'rotate(0deg)' }}
-                            />
-                          </button>
-
-                          {/* Task list — smooth height animation */}
-                          <div style={{
-                            maxHeight: isExpanded ? `${grp.tasks.length * 80 + 60}px` : '0px',
-                            overflow: 'hidden',
-                            transition: 'max-height 0.35s cubic-bezier(0.4,0,0.2,1)',
-                          }}>
-                            <div className="px-3 pb-2.5 space-y-1.5 border-t" style={{ borderColor: `${grp.color}33` }}>
-                              <p className="text-[8px] font-bold text-slate-400 uppercase tracking-widest pt-2">เลือกงาน</p>
-                              {grp.tasks.map((t) => (
-                                <button key={t.id}
-                                  onClick={() => { setSelectedTaskId(t.id); setSelectedGroup(key); }}
-                                  className="w-full flex items-center justify-between px-3 py-2 rounded-xl transition-all text-left"
-                                  style={{
-                                    background: selectedTaskId === t.id && isActive ? grp.color : 'white',
-                                    color: selectedTaskId === t.id && isActive ? 'white' : '#2C2A28',
-                                    border: `1px solid ${selectedTaskId === t.id && isActive ? grp.color : 'rgb(241 245 249)'}`,
-                                  }}>
-                                  <div className="min-w-0">
-                                    <span className="text-[10px] font-black opacity-70 mr-1">[{t.id}]</span>
-                                    <span className="text-[12px] font-semibold">{t.name}</span>
-                                  </div>
-                                  <span className="shrink-0 text-[11px] font-black ml-2 opacity-80">
-                                    {t.creditPerUnit} Cr/{t.unit}
-                                  </span>
-                                </button>
-                              ))}
-                            </div>
-                          </div>
-                        </div>
-                      );
-                    })}
-                  </div>
-                </div>
-
-                {/* Quantity + Credits */}
-                <div className="flex gap-3 items-end">
-                  <div className="flex-1 space-y-1.5">
-                    <label className="text-[9px] font-bold text-slate-400 uppercase tracking-widest">
-                      จำนวน ({currentTask?.unit})
-                    </label>
-                    <div className="flex items-center bg-slate-50 border border-slate-200 rounded-xl overflow-hidden">
-                      <button
-                        onClick={() => setQuantity(Math.max(1, quantity - 1))}
-                        className="w-11 h-11 flex items-center justify-center text-slate-400 active:bg-slate-100 transition-colors"
-                      >
-                        <Minus size={16} />
-                      </button>
-                      <span className="flex-1 text-center text-[22px] font-black text-[#2C2A28]">{quantity}</span>
-                      <button
-                        onClick={() => setQuantity(quantity + 1)}
-                        className="w-11 h-11 flex items-center justify-center text-slate-400 active:bg-slate-100 transition-colors"
-                      >
-                        <Plus size={16} />
-                      </button>
-                    </div>
-                  </div>
-                  <div className="space-y-1.5">
-                    <label className="text-[9px] font-bold text-slate-400 uppercase tracking-widest">Credits</label>
-                    <div className="h-11 px-4 rounded-xl flex items-center justify-center gap-1 min-w-[76px]" style={{ background: 'linear-gradient(135deg, #F4823C, #F5A855)' }}>
-                      <span className="text-[22px] font-light text-white">{quantity * (currentTask?.creditPerUnit || 1)}</span>
-                      <span className="text-[9px] text-white/60 mt-1">Cr.</span>
-                    </div>
-                  </div>
-                </div>
-
-                {/* Notes */}
-                <div className="space-y-1.5">
-                  <label className="text-[9px] font-bold text-slate-400 uppercase tracking-widest">
-                    หมายเหตุ <span className="normal-case font-normal">(ไม่บังคับ)</span>
-                  </label>
-                  <textarea
-                    value={notes}
-                    onChange={(e) => setNotes(e.target.value)}
-                    placeholder="เพิ่มรายละเอียด..."
-                    rows={2}
-                    className="w-full px-4 py-3 bg-[#FDFAF7] border border-slate-200 rounded-xl text-[13px] outline-none resize-none text-[#2C2A28] placeholder:text-slate-300"
-                  />
-                </div>
-
-                {/* Attachments */}
-                <div className="space-y-2">
-                  <label className="text-[9px] font-bold text-slate-400 uppercase tracking-widest">
-                    📎 แนบงาน <span className="normal-case font-normal opacity-60">(ไม่บังคับ)</span>
-                  </label>
-
-                  {/* Canva link */}
-                  <div className="relative">
-                    <span className="absolute left-3 top-1/2 -translate-y-1/2 text-[9px] font-black text-white px-1.5 py-0.5 rounded pointer-events-none" style={{ background: '#7C3AED' }}>C</span>
-                    <input
-                      type="url"
-                      value={canvaLink}
-                      onChange={(e) => setCanvaLink(e.target.value)}
-                      placeholder="Canva link..."
-                      className="w-full pl-9 pr-4 py-2.5 bg-[#FDFAF7] border border-slate-200 rounded-xl text-[13px] outline-none text-[#2C2A28] placeholder:text-slate-300"
-                    />
-                  </div>
-
-                  {/* Drive link */}
-                  <div className="relative">
-                    <span className="absolute left-3 top-1/2 -translate-y-1/2 text-[9px] font-black text-white px-1.5 py-0.5 rounded pointer-events-none" style={{ background: '#1D6F42' }}>D</span>
-                    <input
-                      type="url"
-                      value={driveLink}
-                      onChange={(e) => setDriveLink(e.target.value)}
-                      placeholder="Google Drive link..."
-                      className="w-full pl-9 pr-4 py-2.5 bg-[#FDFAF7] border border-slate-200 rounded-xl text-[13px] outline-none text-[#2C2A28] placeholder:text-slate-300"
-                    />
-                  </div>
-
-                  {/* Uploaded Drive file chips */}
-                  {logAttachments.length > 0 && (
-                    <div className="flex flex-wrap gap-1.5">
-                      {logAttachments.map((att, i) => (
-                        <div key={i} className="flex items-center gap-1 bg-emerald-50 border border-emerald-100 rounded-lg px-2 py-1 max-w-full">
-                          <span className="text-[9px] font-bold text-emerald-700 truncate" style={{ maxWidth: 160 }} title={att.normalizedName}>
-                            {att.normalizedName}
-                          </span>
-                          <button type="button" onClick={() => setLogAttachments(prev => prev.filter((_, j) => j !== i))} className="text-emerald-300 active:text-rose-400 ml-1 text-[12px] leading-none shrink-0">×</button>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-
-                  {/* Action buttons — single row */}
-                  <input ref={logDriveInputRef} type="file" multiple className="hidden" onChange={(e) => handleDriveFilesSelected(e, 'log')} />
-                  <div className="grid grid-cols-2 gap-2">
-                    <button
-                      onClick={() => logDriveInputRef.current?.click()}
-                      disabled={driveUploading}
-                      className={`py-2.5 bg-[#FDFAF7] border border-slate-200 rounded-xl text-[11px] font-bold text-slate-500 flex items-center justify-center gap-1.5 active:bg-emerald-50 transition-colors ${driveUploading ? 'opacity-60' : ''}`}
-                    >
-                      {driveUploading ? <RefreshCw size={13} className="animate-spin" /> : <Upload size={13} />}
-                      {driveUploading ? 'กำลังอัปโหลด...' : 'อัปโหลด Drive'}
-                    </button>
-                    <button
-                      onClick={() => { void handlePickLocalFile(); }}
-                      className="py-2.5 bg-[#FDFAF7] border border-slate-200 rounded-xl text-[11px] font-bold text-slate-500 flex items-center justify-center gap-1.5 active:bg-teal-50 transition-colors"
-                    >
-                      <FileText size={13} /> ไฟล์ในเครื่อง
-                    </button>
-                  </div>
-
-                  {/* Pending local file chips */}
-                  {pendingLocalFiles.length > 0 && (
-                    <div className="flex flex-wrap gap-1.5">
-                      {pendingLocalFiles.map((lf, i) => (
-                        <div key={i} className="flex items-center gap-1 bg-teal-50 border border-teal-100 rounded-lg px-2 py-1 max-w-full">
-                          {lf.thumbnail && <img src={lf.thumbnail} className="w-4 h-4 rounded object-cover shrink-0" alt="" />}
-                          <span className="text-[9px] font-bold text-teal-700 truncate" style={{ maxWidth: 120 }} title={lf.name}>{lf.name}</span>
-                          <button type="button" onClick={() => setPendingLocalFiles(prev => prev.filter((_, j) => j !== i))} className="text-teal-300 active:text-rose-400 ml-1 text-[12px] leading-none shrink-0">×</button>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </div>
-
-                <button
-                  onClick={handleAddEntry}
-                  disabled={isLoading}
-                  className={`w-full py-4 text-white rounded-xl font-bold text-[13px] tracking-[0.15em] shadow-md active:scale-95 transition-all glow-orange ${isLoading ? 'opacity-60' : ''}`}
-                  style={{ background: 'linear-gradient(135deg, #F4823C, #F5A855)' }}
-                >
-                  {isLoading ? <RefreshCw className="animate-spin mx-auto" size={18} /> : 'บันทึกข้อมูล'}
-                </button>
-              </div>
-            </section>
-          </div>
+          <LogTab
+            orderedGroupKeys={orderedGroupKeys}
+            kpiConfig={kpiConfig}
+            selectedDate={selectedDate}
+            setSelectedDate={setSelectedDate}
+            selectedGroup={selectedGroup}
+            setSelectedGroup={setSelectedGroup}
+            selectedTaskId={selectedTaskId}
+            setSelectedTaskId={setSelectedTaskId}
+            expandedGroups={expandedGroups}
+            setExpandedGroups={setExpandedGroups}
+            autoHoverExpand={autoHoverExpand}
+            hoveredGroup={hoveredGroup}
+            setHoveredGroup={setHoveredGroup}
+            currentTask={currentTask}
+            quantity={quantity}
+            setQuantity={setQuantity}
+            notes={notes}
+            setNotes={setNotes}
+            canvaLink={canvaLink}
+            setCanvaLink={setCanvaLink}
+            driveLink={driveLink}
+            setDriveLink={setDriveLink}
+            logAttachments={logAttachments}
+            setLogAttachments={setLogAttachments}
+            pendingLocalFiles={pendingLocalFiles}
+            setPendingLocalFiles={setPendingLocalFiles}
+            logDriveInputRef={logDriveInputRef}
+            handleDriveFilesSelected={handleDriveFilesSelected}
+            handlePickLocalFile={handlePickLocalFile}
+            driveUploading={driveUploading}
+            handleAddEntry={handleAddEntry}
+            isLoading={isLoading}
+          />
         )}
 
-        {/* TODAY TAB */}
         {activeTab === 'today' && (
-          <div className="space-y-3.5 animate-in fade-in slide-in-from-bottom-2 duration-300">
-            <p className="text-[10px] font-bold text-slate-400 uppercase tracking-[0.25em] px-1">
-              {formatThaiDate(getTodayStr(), true)}
-            </p>
-            {todayEntries.length === 0 ? (
-              <div className="text-center py-16 bg-white rounded-[24px] border border-dashed border-slate-200">
-                <Clock size={26} className="text-slate-200 mx-auto mb-3" />
-                <p className="text-slate-300 text-[11px] font-bold uppercase tracking-widest">ยังไม่มีรายการวันนี้</p>
-              </div>
-            ) : (
-              <div className="space-y-2.5">
-                {todayEntries.map((e) => (
-                  <EntryCard key={e.id} entry={e} workGroups={kpiConfig} onEdit={setEditEntry} onDelete={setDeleteId} onShowToast={showToast} />
-                ))}
-              </div>
-            )}
-
-            {/* ── Calendar Events (shown only when iCal URL is configured) */}
-            {(calY8Url || calPvUrl) && (
-              <div className="mt-2">
-                <button
-                  onClick={() => setShowCalSection(s => !s)}
-                  className="w-full flex items-center justify-between px-4 py-3 bg-white rounded-[18px] border border-slate-100 shadow-sm active:bg-slate-50 transition-colors"
-                >
-                  <div className="flex items-center gap-2">
-                    <CalendarIcon size={14} className="text-slate-300" />
-                    <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">กำหนดการ</span>
-                    {calLoading && <span className="text-[9px] text-slate-300 pulse-soft ml-1">กำลังโหลด...</span>}
-                  </div>
-                  <ChevronDown size={14} className={`text-slate-300 transition-transform duration-200 ${showCalSection ? 'rotate-180' : ''}`} />
-                </button>
-                {showCalSection && (
-                  <div className="mt-2 space-y-2 animate-in fade-in duration-200">
-                    {calEvents.length === 0 && !calLoading ? (
-                      <p className="text-center text-[10px] text-slate-300 py-4">ไม่มีกำหนดการวันนี้</p>
-                    ) : (
-                      calEvents.map(ev => (
-                        <div
-                          key={ev.uid}
-                          className="flex items-start gap-3 px-4 py-3 bg-white rounded-[16px] border shadow-sm"
-                          style={{ borderColor: ev.brand === 'y8' ? 'rgba(244,130,60,0.25)' : 'rgba(232,122,165,0.25)' }}
-                        >
-                          <div
-                            className="w-2 h-2 rounded-full mt-1.5 shrink-0"
-                            style={{ background: ev.brand === 'y8' ? '#F4823C' : '#E87AA5' }}
-                          />
-                          <div className="flex-1 min-w-0">
-                            <p className="font-bold text-[#2C2A28] text-[12px] leading-tight">{ev.title}</p>
-                            <p className="text-[9px] text-slate-400 mt-0.5">
-                              {ev.start.toLocaleTimeString('th-TH', { hour: '2-digit', minute: '2-digit' })}
-                              {' – '}
-                              {ev.end.toLocaleTimeString('th-TH', { hour: '2-digit', minute: '2-digit' })}
-                            </p>
-                          </div>
-                          <span
-                            className="text-[8px] font-black px-1.5 py-0.5 rounded text-white shrink-0"
-                            style={{ background: ev.brand === 'y8' ? '#F4823C' : '#E87AA5' }}
-                          >
-                            {ev.brand.toUpperCase()}
-                          </span>
-                        </div>
-                      ))
-                    )}
-                  </div>
-                )}
-              </div>
-            )}
-          </div>
+          <TodayTab
+            todayLabel={formatThaiDate(getTodayStr(), true)}
+            todayEntries={todayEntries}
+            kpiConfig={kpiConfig}
+            setEditEntry={setEditEntry}
+            setDeleteId={setDeleteId}
+            showToast={showToast}
+            EntryCardComponent={EntryCard}
+            calY8Url={calY8Url}
+            calPvUrl={calPvUrl}
+            showCalSection={showCalSection}
+            setShowCalSection={setShowCalSection}
+            calLoading={calLoading}
+            calEvents={calEvents}
+          />
         )}
 
-        {/* HISTORY TAB */}
         {activeTab === 'history' && (
-          <div className="space-y-6 animate-in fade-in slide-in-from-bottom-2 duration-300">
-            {historyDates.length === 0 ? (
-              <div className="text-center py-16 bg-white rounded-[24px] border border-dashed border-slate-200">
-                <History size={26} className="text-slate-200 mx-auto mb-3" />
-                <p className="text-slate-300 text-[11px] font-bold uppercase tracking-widest">ยังไม่มีประวัติ</p>
-              </div>
-            ) : (
-              historyDates.map((date) => {
-                const dayEntries = historyEntries.filter((e) => e.date === date);
-                const dayTotal   = dayEntries.reduce((s, e) => s + e.credits, 0);
-                return (
-                  <div key={date} className="space-y-2.5">
-                    <div className="flex justify-between items-center px-1">
-                      <p className="text-[10px] font-bold text-slate-400 uppercase tracking-[0.2em]">
-                        {formatThaiDate(date, true)}
-                      </p>
-                      <span className="text-[11px] font-bold text-[#F4823C]">{dayTotal} Cr.</span>
-                    </div>
-                    {dayEntries.map((e) => (
-                      <EntryCard key={e.id} entry={e} workGroups={kpiConfig} onEdit={setEditEntry} onDelete={setDeleteId} onShowToast={showToast} />
-                    ))}
-                  </div>
-                );
-              })
-            )}
-          </div>
+          <HistoryTab
+            historyDates={historyDates}
+            historyEntries={historyEntries}
+            kpiConfig={kpiConfig}
+            setEditEntry={setEditEntry}
+            setDeleteId={setDeleteId}
+            showToast={showToast}
+            EntryCardComponent={EntryCard}
+            formatThaiDate={formatThaiDate}
+          />
         )}
 
-        {/* DAILY REPORT TAB */}
         {activeTab === 'daily' && (
-          <div className="space-y-4 animate-in fade-in slide-in-from-bottom-2 duration-300">
-            <div className="bg-white p-4 rounded-[24px] border border-slate-100 shadow-sm space-y-4">
-              <div className="flex items-center gap-2">
-                <FileText size={15} className="text-[#F4823C]" />
-                <div>
-                  <p className="text-[11px] font-bold text-[#2C2A28] uppercase tracking-widest">Daily Report</p>
-                  <p className="text-[9px] text-slate-400">สร้างข้อความรายงานสำหรับส่ง LINE และบันทึก history อัตโนมัติ</p>
-                </div>
-              </div>
-
-              <div className="grid grid-cols-3 gap-2">
-                {[
-                  { key: 'morning', label: 'Morning', icon: <Sun size={14} /> },
-                  { key: 'evening', label: 'Evening', icon: <Moon size={14} /> },
-                  { key: 'history', label: 'History', icon: <History size={14} /> },
-                ].map((tab) => (
-                  <button
-                    key={tab.key}
-                    onClick={() => setDailyTab(tab.key as 'morning' | 'evening' | 'history')}
-                    className={`py-3 rounded-2xl border text-[11px] font-bold flex items-center justify-center gap-1.5 transition-colors ${
-                      dailyTab === tab.key
-                        ? 'bg-[#2C2A28] text-[#F4823C] border-[#2C2A28]'
-                        : 'bg-slate-50 text-slate-400 border-slate-100'
-                    }`}
-                  >
-                    {tab.icon}
-                    {tab.label}
-                  </button>
-                ))}
-              </div>
-
-              <div className="space-y-1.5">
-                <label className="text-[9px] font-bold text-slate-400 uppercase tracking-widest">วันที่รายงาน</label>
-                <input
-                  type="date"
-                  value={dailyDate}
-                  onChange={(e) => setDailyDate(e.target.value)}
-                  className="w-full px-4 py-3 bg-[#FDFAF7] border border-slate-200 rounded-xl font-semibold text-[#2C2A28] text-[13px] outline-none"
-                />
-              </div>
-            </div>
-
-            {dailyTab === 'morning' && (
-              <div className="space-y-4">
-                <section className="bg-white p-4 rounded-[24px] border border-slate-100 shadow-sm space-y-4">
-                  <div className="grid grid-cols-2 gap-3">
-                    <div className="px-4 py-3 bg-slate-50 rounded-2xl border border-slate-100">
-                      <p className="text-[9px] font-bold text-slate-400 uppercase tracking-widest">ผู้รายงาน</p>
-                      <p className="text-[13px] font-bold text-[#2C2A28] mt-1">{displayName}</p>
-                    </div>
-                    <div className="space-y-1.5">
-                      <label className="text-[9px] font-bold text-slate-400 uppercase tracking-widest">Check-in</label>
-                      <input
-                        type="time"
-                        value={morningCheckInTime}
-                        onChange={(e) => setMorningCheckInTime(e.target.value)}
-                        className="w-full px-4 py-3 bg-[#FDFAF7] border border-slate-200 rounded-xl text-[13px] font-semibold outline-none"
-                      />
-                    </div>
-                  </div>
-
-                  <DailyListField
-                    label="Focus (งานที่โฟกัสหรือเร่งด่วนวันนี้)"
-                    prefix="F"
-                    items={morningFocusItems}
-                    onAdd={() => addDailyListItem(setMorningFocusItems)}
-                    onChange={(index, value) => updateDailyListItem(setMorningFocusItems, index, value)}
-                    onRemove={(index) => removeDailyListItem(setMorningFocusItems, index)}
-                  />
-
-                  <button
-                    onClick={() => void saveAndCopyDailyReport('morning')}
-                    disabled={dailySaving}
-                    className="w-full py-4 text-white rounded-2xl font-bold text-[13px] tracking-wide active:scale-95 transition-all glow-orange disabled:opacity-60"
-                    style={{ background: 'linear-gradient(135deg, #F4823C, #F5A855)' }}
-                  >
-                    {dailySaving ? 'กำลังบันทึก...' : dailyCopySuccess ? 'Copied for LINE ✓' : 'Save & Copy for LINE'}
-                  </button>
-                </section>
-
-                <section className="bg-[#2C2A28] p-4 rounded-[24px] border border-[#2C2A28] shadow-sm space-y-3">
-                  <div className="flex items-center justify-between">
-                    <p className="text-[10px] font-bold text-white/60 uppercase tracking-widest">Preview</p>
-                    <button
-                      onClick={() => void copyDailyText(morningPreviewText).then(() => showToast('คัดลอก Preview แล้ว ✓')).catch(() => showToast('❌ คัดลอกไม่สำเร็จ'))}
-                      className="px-3 py-1.5 rounded-xl bg-white/10 text-white text-[10px] font-bold flex items-center gap-1.5"
-                    >
-                      {dailyCopySuccess ? <ClipboardCheck size={13} className="text-emerald-300" /> : <Copy size={13} />}
-                      Copy
-                    </button>
-                  </div>
-                  <pre className="whitespace-pre-wrap text-[11px] leading-relaxed text-white/90 font-mono">{morningPreviewText}</pre>
-                </section>
-              </div>
-            )}
-
-            {dailyTab === 'evening' && (
-              <div className="space-y-4">
-                <section className="bg-white p-4 rounded-[24px] border border-slate-100 shadow-sm space-y-4">
-                  <div className="px-4 py-3 bg-slate-50 rounded-2xl border border-slate-100">
-                    <p className="text-[9px] font-bold text-slate-400 uppercase tracking-widest">Auto Draft จาก Work Log</p>
-                    <p className="text-[12px] font-bold text-[#2C2A28] mt-1">{dailyEntriesForDate.length} รายการในวันที่เลือก</p>
-                    <p className="text-[9px] text-slate-400 mt-1">Routine และ Results จะดึงจากงานที่บันทึกไว้ของวันนั้นให้อัตโนมัติ</p>
-                  </div>
-
-                  <DailyListField
-                    label="Routine"
-                    prefix="✔️"
-                    items={eveningRoutineItems}
-                    onAdd={() => addDailyListItem(setEveningRoutineItems)}
-                    onChange={(index, value) => updateDailyListItem(setEveningRoutineItems, index, value)}
-                    onRemove={(index) => removeDailyListItem(setEveningRoutineItems, index)}
-                  />
-
-                  <DailyListField
-                    label="Results (ผลลัพธ์ของงานวันนี้)"
-                    prefix="R"
-                    items={eveningResultItems}
-                    onAdd={() => addDailyListItem(setEveningResultItems)}
-                    onChange={(index, value) => updateDailyListItem(setEveningResultItems, index, value)}
-                    onRemove={(index) => removeDailyListItem(setEveningResultItems, index)}
-                  />
-
-                  <DailyListField
-                    label="Next Move (พรุ่งนี้จะทำอะไรต่อ)"
-                    prefix="N"
-                    items={eveningNextMoveItems}
-                    onAdd={() => addDailyListItem(setEveningNextMoveItems)}
-                    onChange={(index, value) => updateDailyListItem(setEveningNextMoveItems, index, value)}
-                    onRemove={(index) => removeDailyListItem(setEveningNextMoveItems, index)}
-                  />
-
-                  <div className="space-y-3">
-                    <div className="space-y-1.5">
-                      <label className="text-[9px] font-bold text-slate-400 uppercase tracking-widest">Issues</label>
-                      <input
-                        type="text"
-                        value={dailyIssues}
-                        onChange={(e) => setDailyIssues(e.target.value)}
-                        placeholder="มีปัญหาอะไรไหม? ถ้าไม่มีใส่ 'ไม่มี'"
-                        className="w-full px-4 py-3 bg-[#FDFAF7] border border-slate-200 rounded-xl text-[13px] outline-none"
-                      />
-                    </div>
-                    <div className="grid grid-cols-2 gap-2">
-                      <button
-                        type="button"
-                        onClick={() => setDailyIssueStatus('resolved')}
-                        className={`py-3 rounded-2xl border text-[11px] font-bold transition-colors ${
-                          dailyIssueStatus === 'resolved' ? 'bg-emerald-500 text-white border-emerald-500' : 'bg-slate-50 text-slate-500 border-slate-100'
-                        }`}
-                      >
-                        แก้ไขได้แล้ว
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => setDailyIssueStatus('unresolved')}
-                        className={`py-3 rounded-2xl border text-[11px] font-bold transition-colors ${
-                          dailyIssueStatus === 'unresolved' ? 'bg-rose-500 text-white border-rose-500' : 'bg-slate-50 text-slate-500 border-slate-100'
-                        }`}
-                      >
-                        ยังแก้ไขไม่ได้
-                      </button>
-                    </div>
-                    <textarea
-                      value={dailyIssueDetail}
-                      onChange={(e) => setDailyIssueDetail(e.target.value)}
-                      placeholder="รายละเอียดปัญหา / การแก้ไข"
-                      rows={2}
-                      className="w-full px-4 py-3 bg-[#FDFAF7] border border-slate-200 rounded-2xl text-[13px] outline-none resize-none"
-                    />
-                    <textarea
-                      value={dailyIssueNextStep}
-                      onChange={(e) => setDailyIssueNextStep(e.target.value)}
-                      placeholder="แนวทางการดำเนินการต่อ"
-                      rows={2}
-                      className="w-full px-4 py-3 bg-[#FDFAF7] border border-slate-200 rounded-2xl text-[13px] outline-none resize-none"
-                    />
-                  </div>
-
-                  <button
-                    onClick={() => void saveAndCopyDailyReport('evening')}
-                    disabled={dailySaving}
-                    className="w-full py-4 text-white rounded-2xl font-bold text-[13px] tracking-wide active:scale-95 transition-all glow-orange disabled:opacity-60"
-                    style={{ background: 'linear-gradient(135deg, #F4823C, #F5A855)' }}
-                  >
-                    {dailySaving ? 'กำลังบันทึก...' : dailyCopySuccess ? 'Copied for LINE ✓' : 'Save & Copy for LINE'}
-                  </button>
-                </section>
-
-                <section className="bg-[#2C2A28] p-4 rounded-[24px] border border-[#2C2A28] shadow-sm space-y-3">
-                  <div className="flex items-center justify-between">
-                    <p className="text-[10px] font-bold text-white/60 uppercase tracking-widest">Preview</p>
-                    <button
-                      onClick={() => void copyDailyText(eveningPreviewText).then(() => showToast('คัดลอก Preview แล้ว ✓')).catch(() => showToast('❌ คัดลอกไม่สำเร็จ'))}
-                      className="px-3 py-1.5 rounded-xl bg-white/10 text-white text-[10px] font-bold flex items-center gap-1.5"
-                    >
-                      {dailyCopySuccess ? <ClipboardCheck size={13} className="text-emerald-300" /> : <Copy size={13} />}
-                      Copy
-                    </button>
-                  </div>
-                  <pre className="whitespace-pre-wrap text-[11px] leading-relaxed text-white/90 font-mono">{eveningPreviewText}</pre>
-                </section>
-              </div>
-            )}
-
-            {dailyTab === 'history' && (
-              <div className="space-y-3">
-                {dailyReportsLoading ? (
-                  <div className="text-center py-16 bg-white rounded-[24px] border border-dashed border-slate-200">
-                    <RefreshCw size={24} className="text-slate-200 mx-auto mb-3 animate-spin" />
-                    <p className="text-slate-300 text-[11px] font-bold uppercase tracking-widest">กำลังโหลด Daily Reports</p>
-                  </div>
-                ) : dailyReports.length === 0 ? (
-                  <div className="text-center py-16 bg-white rounded-[24px] border border-dashed border-slate-200">
-                    <History size={26} className="text-slate-200 mx-auto mb-3" />
-                    <p className="text-slate-300 text-[11px] font-bold uppercase tracking-widest">ยังไม่มี Daily Report</p>
-                  </div>
-                ) : (
-                  dailyReports.map((report) => (
-                    <div key={report.id} className="bg-white p-4 rounded-[20px] border border-slate-100 shadow-sm space-y-3">
-                      <div className="flex items-start justify-between gap-3">
-                        <div className="min-w-0">
-                          <div className="flex items-center gap-2">
-                            <span className={`w-8 h-8 rounded-xl flex items-center justify-center ${report.type === 'morning' ? 'bg-orange-50 text-orange-500' : 'bg-pink-50 text-pink-500'}`}>
-                              {report.type === 'morning' ? <Sun size={15} /> : <Moon size={15} />}
-                            </span>
-                            <div>
-                              <p className="text-[12px] font-bold text-[#2C2A28]">{report.type === 'morning' ? 'Morning Report' : 'Evening Report'}</p>
-                              <p className="text-[9px] text-slate-400">{formatThaiDate(report.date, true)}</p>
-                            </div>
-                          </div>
-                        </div>
-                        <button
-                          onClick={() => void handleCopyDailyHistory(report)}
-                          className="shrink-0 px-3 py-2 rounded-xl bg-slate-50 border border-slate-100 text-[10px] font-bold text-slate-500 flex items-center gap-1.5"
-                        >
-                          <Copy size={12} /> Copy Again
-                        </button>
-                      </div>
-                      <p className="text-[11px] text-slate-500 leading-relaxed whitespace-pre-line">
-                        {report.generatedText.split('\n').slice(0, 6).join('\n')}
-                      </p>
-                      <div className="flex items-center justify-between text-[9px] text-slate-300">
-                        <span>อัปเดตล่าสุด {new Date(report.updatedAt).toLocaleString('th-TH')}</span>
-                        <span>{report.lastCopiedAt ? `คัดลอกล่าสุด ${new Date(report.lastCopiedAt).toLocaleTimeString('th-TH', { hour: '2-digit', minute: '2-digit' })}` : 'ยังไม่เคยคัดลอกซ้ำ'}</span>
-                      </div>
-                    </div>
-                  ))
-                )}
-              </div>
-            )}
-          </div>
+          <DailyTab
+            dailyTab={dailyTab}
+            setDailyTab={setDailyTab}
+            dailyDate={dailyDate}
+            setDailyDate={setDailyDate}
+            displayName={displayName}
+            morningCheckInTime={morningCheckInTime}
+            setMorningCheckInTime={setMorningCheckInTime}
+            morningFocusItems={morningFocusItems}
+            setMorningFocusItems={setMorningFocusItems}
+            eveningRoutineItems={eveningRoutineItems}
+            setEveningRoutineItems={setEveningRoutineItems}
+            eveningResultItems={eveningResultItems}
+            setEveningResultItems={setEveningResultItems}
+            eveningNextMoveItems={eveningNextMoveItems}
+            setEveningNextMoveItems={setEveningNextMoveItems}
+            dailyIssues={dailyIssues}
+            setDailyIssues={setDailyIssues}
+            dailyIssueStatus={dailyIssueStatus}
+            setDailyIssueStatus={setDailyIssueStatus}
+            dailyIssueDetail={dailyIssueDetail}
+            setDailyIssueDetail={setDailyIssueDetail}
+            dailyIssueNextStep={dailyIssueNextStep}
+            setDailyIssueNextStep={setDailyIssueNextStep}
+            dailyEntriesForDate={dailyEntriesForDate}
+            dailySaving={dailySaving}
+            dailyCopySuccess={dailyCopySuccess}
+            morningPreviewText={morningPreviewText}
+            eveningPreviewText={eveningPreviewText}
+            dailyReportsLoading={dailyReportsLoading}
+            dailyReports={dailyReports}
+            addDailyListItem={addDailyListItem}
+            updateDailyListItem={updateDailyListItem}
+            removeDailyListItem={removeDailyListItem}
+            saveAndCopyDailyReport={saveAndCopyDailyReport}
+            copyDailyText={copyDailyText}
+            handleCopyDailyHistory={handleCopyDailyHistory}
+            showToast={showToast}
+            formatThaiDate={formatThaiDate}
+            DailyListFieldComponent={DailyListField}
+          />
         )}
 
-        {/* SUMMARY TAB */}
         {activeTab === 'summary' && (
-          <div className="space-y-3.5 animate-in fade-in slide-in-from-bottom-2 duration-300">
-
-            {/* Month Navigator */}
-            <div className="flex items-center justify-between bg-white rounded-[18px] p-1.5 border border-slate-100 shadow-sm">
-              <button
-                onClick={() => navSummaryMonth(-1)}
-                className="w-9 h-9 flex items-center justify-center rounded-xl text-slate-400 active:bg-slate-50 transition-colors"
-              >
-                <ChevronLeft size={18} />
-              </button>
-              <div className="text-center">
-                <p className="font-bold text-[#2C2A28] text-[14px]">{summaryData.monthName}</p>
-                <p className="text-[10px] text-slate-400">{summaryYear}</p>
-              </div>
-              <button
-                onClick={() => navSummaryMonth(1)}
-                disabled={isAtCurrentMonth}
-                className="w-9 h-9 flex items-center justify-center rounded-xl text-slate-400 active:bg-slate-50 disabled:opacity-25 transition-colors"
-              >
-                <ChevronRight size={18} />
-              </button>
-            </div>
-
-            {/* Main Progress Card */}
-            <section className="bg-white p-5 rounded-[24px] border border-slate-100 shadow-sm">
-              <div className="flex justify-between items-start mb-4">
-                <div>
-                  <p className="text-[9px] font-bold text-slate-400 uppercase tracking-widest mb-1">Progress</p>
-                  <div className="flex items-end gap-2">
-                    <p className="text-[38px] font-light text-[#2C2A28] leading-none">{summaryData.totalCredits}</p>
-                    <p className="text-[14px] text-slate-300 mb-0.5">/ {monthlyTarget} Cr.</p>
-                  </div>
-                </div>
-                <div className="text-right">
-                  <div className={`px-3 py-1.5 rounded-xl text-[11px] font-bold ${summaryData.isComplete ? 'bg-emerald-50 text-emerald-600' : 'bg-slate-50 text-slate-500'}`}>
-                    {summaryData.isTargetSet
-                      ? (summaryData.isComplete ? '✓ ถึงเป้าแล้ว' : `${Math.round(summaryData.percent)}%`)
-                      : 'ยังไม่ตั้งเป้า'}
-                  </div>
-                  <p className="text-[9px] text-slate-300 mt-1.5">{summaryData.entryCount} รายการ</p>
-                </div>
-              </div>
-              <div className="h-2 bg-slate-100 rounded-full overflow-hidden">
-                <div
-                  className="h-full rounded-full transition-all duration-700 ease-out"
-                  style={{
-                    width: `${summaryData.percent}%`,
-                    backgroundColor: summaryData.isComplete ? '#34d399' : '#F4823C',
-                  }}
-                />
-              </div>
-            </section>
-
-            {/* Daily Progress (current month, not complete) */}
-            {summaryData.isCurrentMonth && summaryData.isTargetSet && !summaryData.isComplete && (
-              <section className="bg-[#2C2A28] px-5 py-4 rounded-[24px] shadow-lg">
-                <div className="flex items-center gap-3">
-                  <div className="w-9 h-9 bg-white/10 rounded-xl flex items-center justify-center shrink-0">
-                    <TrendingUp size={16} className="text-[#F4823C]" />
-                  </div>
-                  <div>
-                    <p className="text-[9px] font-bold text-white/50 uppercase tracking-widest">ต้องทำต่อวัน</p>
-                    <p className="text-white font-bold leading-none mt-0.5">
-                      <span className="text-[24px] font-light">{summaryData.dailyNeeded}</span>
-                      <span className="text-[12px] ml-1 text-white/50">Cr./วัน</span>
-                    </p>
-                  </div>
-                  <div className="ml-auto text-right">
-                    <p className="text-[9px] font-bold text-white/50 uppercase tracking-widest">เหลืออีก</p>
-                    <p className="text-white font-bold leading-none mt-0.5">
-                      <span className="text-[24px] font-light">{summaryData.remainingCredits}</span>
-                      <span className="text-[12px] ml-1 text-white/50">Cr.</span>
-                    </p>
-                    <p className="text-[9px] text-white/40 mt-1">{summaryData.remainingDays} วันที่เหลือ</p>
-                  </div>
-                </div>
-              </section>
-            )}
-
-            {/* Group Breakdown */}
-            {summaryData.groups.length > 0 ? (
-              <section className="bg-white p-5 rounded-[24px] border border-slate-100 shadow-sm">
-                <div className="flex items-center gap-2 mb-4">
-                  <BarChart3 size={14} className="text-slate-300" />
-                  <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">สัดส่วนงาน</p>
-                </div>
-                <div className="space-y-4">
-                  {summaryData.groups.map((g) => (
-                    <GroupBar
-                      key={g.key}
-                      groupKey={g.key}
-                      name={g.name}
-                      credits={g.credits}
-                      maxCredits={summaryData.maxGroupCredits}
-                      color={g.color}
-                      bg={g.bg}
-                    />
-                  ))}
-                </div>
-              </section>
-            ) : (
-              <div className="text-center py-12 bg-white rounded-[24px] border border-dashed border-slate-200">
-                <BarChart3 size={26} className="text-slate-200 mx-auto mb-3" />
-                <p className="text-slate-300 text-[11px] font-bold uppercase tracking-widest">ไม่มีข้อมูลในเดือนนี้</p>
-              </div>
-            )}
-
-            {/* Actions */}
-            <div className="grid grid-cols-3 gap-2.5">
-              <button
-                onClick={() => void handleExportToGoogleSheets()}
-                disabled={sheetsExporting}
-                className="py-5 bg-white rounded-[20px] shadow-sm border border-slate-100 flex flex-col items-center justify-center gap-2 active:scale-95 transition-all disabled:opacity-60"
-              >
-                {sheetsExporting
-                  ? <RefreshCw size={18} className="animate-spin text-emerald-400" />
-                  : <FileText size={18} className="text-emerald-500" />}
-                <span className="font-bold text-[9px] tracking-widest text-[#2C2A28] uppercase">
-                  {sheetsExporting ? 'กำลังส่ง...' : 'Google Sheet'}
-                </span>
-              </button>
-              <button
-                onClick={() => void handleGeminiSummary()}
-                className="py-5 bg-white rounded-[20px] shadow-sm border border-slate-100 flex flex-col items-center justify-center gap-2 active:scale-95 transition-all"
-              >
-                <Sparkles size={18} className={geminiLoading ? 'animate-spin text-violet-400' : 'text-violet-500'} />
-                <span className="font-bold text-[9px] tracking-widest text-[#2C2A28] uppercase">Gemini AI</span>
-              </button>
-              <button
-                onClick={() => setShowExportModal(true)}
-                className="py-5 bg-white rounded-[20px] shadow-sm border border-slate-100 flex flex-col items-center justify-center gap-2 active:scale-95 transition-all"
-              >
-                <Download size={18} className="text-sky-500" />
-                <span className="font-bold text-[9px] tracking-widest text-[#2C2A28] uppercase">Export</span>
-              </button>
-            </div>
-
-            {/* Gemini AI Result Panel */}
-            {showGemini && (
-              <section className="bg-white p-5 rounded-[24px] border border-violet-100 shadow-sm animate-in fade-in duration-300">
-                <div className="flex items-center justify-between mb-3">
-                  <div className="flex items-center gap-2">
-                    <Sparkles size={14} className="text-violet-500" />
-                    <p className="text-[10px] font-bold text-violet-600 uppercase tracking-widest">Gemini AI Summary</p>
-                  </div>
-                  <button onClick={() => setShowGemini(false)} className="text-slate-300 hover:text-slate-500">
-                    <X size={16} />
-                  </button>
-                </div>
-                {geminiLoading ? (
-                  <div className="flex items-center gap-2 text-slate-400 text-[12px]">
-                    <RefreshCw size={14} className="animate-spin" />
-                    กำลังวิเคราะห์...
-                  </div>
-                ) : (
-                  <p className="text-[13px] text-[#2C2A28] leading-relaxed whitespace-pre-wrap">{geminiResult}</p>
-                )}
-                {!geminiLoading && geminiResult && (
-                  <button
-                    onClick={() => { void navigator.clipboard.writeText(geminiResult); showToast('คัดลอกแล้ว ✓'); }}
-                    className="mt-3 w-full py-2 bg-violet-50 rounded-xl text-[11px] font-bold text-violet-600 active:bg-violet-100 transition-colors"
-                  >
-                    📋 คัดลอกข้อความ
-                  </button>
-                )}
-              </section>
-            )}
-          </div>
+          <SummaryTab
+            summaryData={summaryData}
+            summaryYear={summaryYear}
+            monthlyTarget={monthlyTarget}
+            isAtCurrentMonth={isAtCurrentMonth}
+            navSummaryMonth={navSummaryMonth}
+            handleExportToGoogleSheets={handleExportToGoogleSheets}
+            sheetsExporting={sheetsExporting}
+            handleGeminiSummary={handleGeminiSummary}
+            geminiLoading={geminiLoading}
+            setShowExportModal={setShowExportModal}
+            showGemini={showGemini}
+            setShowGemini={setShowGemini}
+            geminiResult={geminiResult}
+            showToast={showToast}
+            GroupBarComponent={GroupBar}
+          />
         )}
 
-        {/* ADMIN TAB */}
         {activeTab === 'admin' && isSuperAdmin && (
-          <div className="space-y-3.5 animate-in fade-in slide-in-from-bottom-2 duration-300">
-            <section className="bg-white p-5 rounded-[24px] border border-slate-100 shadow-sm">
-              <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1">Admin Overview</p>
-              <p className="text-[20px] font-light text-[#2C2A28]">{adminProfiles.length} Users ทั้งหมด</p>
-              <p className="text-[11px] text-slate-400 mt-1">
-                Active เดือนนี้ {adminSummary.length} คน · รวม {adminEntries.length} รายการ
-              </p>
-            </section>
-
-            {adminLoading ? (
-              <div className="text-center py-10 text-slate-300 text-[11px] font-bold uppercase tracking-widest">
-                กำลังโหลดข้อมูลรวม...
-              </div>
-            ) : adminProfiles.length === 0 ? (
-              <div className="text-center py-12 bg-white rounded-[24px] border border-dashed border-slate-200">
-                <UserCircle size={26} className="text-slate-200 mx-auto mb-3" />
-                <p className="text-slate-300 text-[11px] font-bold uppercase tracking-widest">ยังไม่มีผู้ใช้ในระบบ</p>
-              </div>
-            ) : (
-              <div className="space-y-2.5">
-                {adminProfiles.map((profile, idx) => {
-                  const summary = adminSummary.find(r => r.uid === profile.uid);
-                  const isSelf  = profile.uid === currentUser?.uid;
-                  return (
-                    <div key={profile.uid} className="bg-white px-4 py-3.5 rounded-[18px] border border-slate-100 shadow-sm">
-                      <div className="flex items-center justify-between gap-2">
-                        <div className="flex-1 min-w-0">
-                          <p className="text-[13px] font-bold text-[#2C2A28] truncate">
-                            {idx + 1}. {profile.nickname || profile.displayName || profile.email}
-                            {isSelf && <span className="ml-1.5 text-[9px] font-bold text-[#F4823C] bg-orange-50 px-1.5 py-0.5 rounded-full">YOU</span>}
-                          </p>
-                          <p className="text-[10px] text-slate-400">
-                            {ROLE_EMOJI[profile.role] || '⚙️'} {ROLE_DEFAULTS[profile.role]?.meta.label || profile.role}
-                          </p>
-                        </div>
-                        <div className="flex items-center gap-2 shrink-0">
-                          <div className="text-right">
-                            <p className="text-[14px] font-bold text-[#F4823C]">{summary?.credits ?? 0} Cr.</p>
-                            <p className="text-[9px] text-slate-300">
-                              {summary ? `${summary.count} รายการ · ${summary.percent}%` : 'ไม่มีข้อมูลเดือนนี้'}
-                            </p>
-                          </div>
-                          {/* Delete button — hidden for self */}
-                          {!isSelf && (
-                            <button
-                              onClick={() => void handleDeleteAdminUser(profile.uid, profile.nickname || profile.displayName || profile.email)}
-                              className="w-8 h-8 flex items-center justify-center rounded-xl bg-rose-50 text-rose-400 active:bg-rose-100 transition-colors shrink-0"
-                              title="ลบผู้ใช้"
-                            >
-                              <Trash2 size={13} />
-                            </button>
-                          )}
-                        </div>
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            )}
-          </div>
+          <AdminTab
+            adminProfiles={adminProfiles}
+            adminSummary={adminSummary}
+            adminEntries={adminEntries}
+            adminLoading={adminLoading}
+            currentUserUid={currentUser?.uid}
+            handleDeleteAdminUser={handleDeleteAdminUser}
+          />
         )}
       </main>
 
