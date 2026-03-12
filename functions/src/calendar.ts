@@ -131,7 +131,7 @@ export const parseIcsCalendar = (text: string, config: OrgCalendarConfig): Norma
   unfoldIcs(text)
     .split('BEGIN:VEVENT')
     .slice(1)
-    .map((block) => {
+    .flatMap((block) => {
       const uid = readProperty(block, 'UID')?.value || crypto.randomUUID();
       const summary = readProperty(block, 'SUMMARY')?.value || '(ไม่มีชื่อ)';
       const description = readProperty(block, 'DESCRIPTION')?.value || '';
@@ -139,8 +139,8 @@ export const parseIcsCalendar = (text: string, config: OrgCalendarConfig): Norma
       const end = parseDateValue(readProperty(block, 'DTEND'), start.timezone || config.timezone);
       const meta = inferMetadata(summary, description);
 
-      if (!start.iso) return null;
-      return {
+      if (!start.iso) return [];
+      return [{
         id: uid,
         title: summary,
         description,
@@ -154,9 +154,8 @@ export const parseIcsCalendar = (text: string, config: OrgCalendarConfig): Norma
         launchDate: meta.launchDate,
         rawCategoryText: meta.rawCategoryText,
         kind: meta.kind,
-      } satisfies NormalizedCalendarEvent;
+      } satisfies NormalizedCalendarEvent];
     })
-    .filter((event): event is NormalizedCalendarEvent => Boolean(event))
     .sort((a, b) => new Date(a.start).getTime() - new Date(b.start).getTime());
 
 export const fetchNormalizedCalendarFeed = async (config: OrgCalendarConfig) => {

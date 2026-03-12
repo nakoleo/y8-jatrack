@@ -4,7 +4,7 @@ import {
   PlusCircle, History, BarChart3, Calendar as CalendarIcon,
   Trash2, CheckCircle2, Plus, Minus, Clock, Edit3, X, Settings,
   ChevronDown, FileText, Sparkles, Download, RefreshCw,
-  ChevronLeft, ChevronRight, TrendingUp,
+  ChevronLeft, ChevronRight, TrendingUp, Wifi, WifiOff,
   Save, UserCircle, Upload, Copy, ClipboardCheck, Sun, Moon,
 } from 'lucide-react';
 import {
@@ -282,9 +282,13 @@ interface PendingUploadFile {
 
 // ─── MODAL ───────────────────────────────────────────────────────────────────
 const Modal = ({
-  isOpen, onClose, title, children,
+  isOpen, onClose, title, children, maxWidthClassName = 'max-w-md',
 }: {
-  isOpen: boolean; onClose: () => void; title: string; children: React.ReactNode;
+  isOpen: boolean;
+  onClose: () => void;
+  title: string;
+  children: React.ReactNode;
+  maxWidthClassName?: string;
 }) => {
   if (!isOpen) return null;
   return (
@@ -293,7 +297,7 @@ const Modal = ({
       onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
     >
       <div
-        className="bg-white w-full max-w-md rounded-t-[36px] shadow-2xl animate-in slide-in-from-bottom duration-300 flex flex-col"
+        className={`bg-white w-full ${maxWidthClassName} rounded-t-[36px] shadow-2xl animate-in slide-in-from-bottom duration-300 flex flex-col`}
         style={{ maxHeight: 'min(92dvh, calc(100vh - env(safe-area-inset-top, 0px) - 1rem))' }}
       >
         {/* Sticky title row */}
@@ -1219,12 +1223,13 @@ export default function App() {
   const [dailyIssueNextStep, setDailyIssueNextStep] = useState('');
 
   // ── Integration states
-  const [calY8Url, setCalY8Url]               = useState('');
-  const [calPvUrl, setCalPvUrl]               = useState('');
   const [driveFolderId, setDriveFolderId]     = useState('');
-  const [calEvents, setCalEvents]             = useState<CalEvent[]>([]);
-  const [calLoading, setCalLoading]           = useState(false);
-  const [showCalSection, setShowCalSection]   = useState(true);
+  const [orgCalendarConfig, setOrgCalendarConfig] = useState<OrgCalendarConfig>(DEFAULT_ORG_CALENDAR_CONFIG);
+  const [calendarDraft, setCalendarDraft]     = useState<OrgCalendarConfig>(DEFAULT_ORG_CALENDAR_CONFIG);
+  const [calendarEvents, setCalendarEvents]   = useState<NormalizedCalendarEvent[]>([]);
+  const [calendarLoading, setCalendarLoading] = useState(false);
+  const [calendarActionLoading, setCalendarActionLoading] = useState(false);
+  const [calendarError, setCalendarError]     = useState('');
   const [driveUploading, setDriveUploading]   = useState(false);
   const [driveUploadingEdit, setDriveUploadingEdit] = useState(false);
   const [googleAccessToken, setGoogleAccessToken] = useState('');
@@ -1272,8 +1277,6 @@ export default function App() {
       localStorage.getItem(scopedKey(uid, key)) ?? fallback;
 
     setSheetUrl(readSetting('sheet_url', ''));
-    setCalY8Url(readSetting('cal_y8', ''));
-    setCalPvUrl(readSetting('cal_pv', ''));
     setDriveFolderId(readSetting('drive_folder_id', ''));
     const savedGender = readSetting('report_gender', 'male');
     setReportGender(savedGender === 'female' ? 'female' : 'male');
@@ -1307,7 +1310,8 @@ export default function App() {
   useEffect(() => {
     if (!showSettings) return;
     if (userProfile?.customTitle !== undefined) setCustomTitleDraft(userProfile.customTitle || '');
-  }, [showSettings]);
+    setCalendarDraft(orgCalendarConfig);
+  }, [showSettings, orgCalendarConfig, userProfile?.customTitle]);
 
   // ── localStorage offline cache
   useEffect(() => {
@@ -1360,8 +1364,6 @@ export default function App() {
           if (profile.settings) {
             const s = profile.settings;
             if (s.autoHoverExpand !== undefined) setAutoHoverExpand(s.autoHoverExpand);
-            if (s.calY8Url)       setCalY8Url(s.calY8Url);
-            if (s.calPvUrl)       setCalPvUrl(s.calPvUrl);
             if (s.driveFolderId)  setDriveFolderId(s.driveFolderId);
             if (s.sheetUrl)       setSheetUrl(s.sheetUrl);
             if (s.reportGender)   setReportGender(s.reportGender);
@@ -1577,33 +1579,66 @@ export default function App() {
     return () => unsubscribe();
   }, [currentUser]);
 
-  // ── Calendar iCal fetch (fetches when Today tab is active)
+  // ── Org-level calendar config
   useEffect(() => {
-    if (activeTab !== 'today') return;
-    const urls: { url: string; brand: 'y8' | 'pv' }[] = [];
-    if (calY8Url) urls.push({ url: calY8Url, brand: 'y8' });
-    if (calPvUrl) urls.push({ url: calPvUrl, brand: 'pv' });
-    if (!urls.length) return;
-    setCalLoading(true);
-    Promise.all(
-      urls.map(({ url, brand }) =>
-        fetch(`https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`)
-          .then(r => r.text())
-          .then(t => parseIcal(t, brand))
-          .catch(() => [] as CalEvent[])
-      )
-    )
-      .then((results) => {
-        const today = getTodayStr();
-        setCalEvents(
-          results
-            .flat()
-            .filter((ev) => dateToLocalStr(ev.start) === today)
-            .sort((a, b) => a.start.getTime() - b.start.getTime())
-        );
+    if (!currentUser) {
+      setOrgCalendarConfig(DEFAULT_ORG_CALENDAR_CONFIG);
+      setCalendarDraft(DEFAULT_ORG_CALENDAR_CONFIG);
+      return;
+    }
+
+    const unsubscribe = onSnapshot(
+      doc(db, 'system', 'appConfig'),
+      (snapshot) => {
+        const next = {
+          ...DEFAULT_ORG_CALENDAR_CONFIG,
+          ...(snapshot.data()?.calendar || {}),
+        } as OrgCalendarConfig;
+        setOrgCalendarConfig(next);
+        setCalendarDraft((prev) => (showSettings ? prev : next));
+      },
+      () => {
+        setOrgCalendarConfig(DEFAULT_ORG_CALENDAR_CONFIG);
+      },
+    );
+
+    return () => unsubscribe();
+  }, [currentUser, showSettings]);
+
+  // ── Normalized calendar feed
+  useEffect(() => {
+    if (!currentUser) {
+      setCalendarEvents([]);
+      setCalendarError('');
+      return;
+    }
+
+    const shouldLoadCalendar = activeTab === 'today' || activeTab === 'calendar' || showSettings;
+    if (!shouldLoadCalendar || !orgCalendarConfig.enabled) return;
+
+    let cancelled = false;
+    setCalendarLoading(true);
+    setCalendarError('');
+
+    void getCalendarFeedCallable()
+      .then((data) => {
+        if (cancelled) return;
+        setCalendarEvents(data.events || []);
+        setOrgCalendarConfig((prev) => ({ ...prev, ...data.config }));
       })
-      .finally(() => setCalLoading(false));
-  }, [activeTab, calY8Url, calPvUrl]);
+      .catch((error) => {
+        if (cancelled) return;
+        setCalendarEvents([]);
+        setCalendarError(error instanceof Error ? error.message : 'โหลดปฏิทินไม่สำเร็จ');
+      })
+      .finally(() => {
+        if (!cancelled) setCalendarLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [activeTab, currentUser, orgCalendarConfig.enabled, orgCalendarConfig.y8ContentFeedUrl, showSettings]);
 
   useEffect(() => {
     if (!isSuperAdmin && activeTab === 'admin') {
@@ -1977,6 +2012,83 @@ export default function App() {
     setUserProfile((prev) => (prev ? { ...prev, nickname: cleaned } : prev));
     showToast('บันทึกชื่อเล่นแล้ว');
     return true;
+  };
+
+  const handleValidateCalendar = async () => {
+    if (!isSuperAdmin) return;
+    setCalendarActionLoading(true);
+    try {
+      const result = await updateCalendarConfigCallable({
+        y8ContentFeedUrl: calendarDraft.y8ContentFeedUrl,
+        enabled: calendarDraft.enabled,
+        label: calendarDraft.label,
+        timezone: calendarDraft.timezone,
+        validateOnly: true,
+      });
+      setCalendarDraft(result.config);
+      setOrgCalendarConfig((prev) => ({ ...prev, ...result.config }));
+      showToast(`ตรวจสอบ feed แล้ว ✓ (${result.eventCount} events)`);
+    } catch (error) {
+      showToast(`ตรวจสอบ feed ไม่สำเร็จ: ${(error as Error).message}`);
+    } finally {
+      setCalendarActionLoading(false);
+    }
+  };
+
+  const handleSaveSettings = async () => {
+    if (!currentUser) return;
+    const ok = await handleSaveNickname(nicknameDraft);
+    if (!ok) return;
+
+    try {
+      let nextCalendarConfig = orgCalendarConfig;
+      if (isSuperAdmin) {
+        const calendarResult = await updateCalendarConfigCallable({
+          y8ContentFeedUrl: calendarDraft.y8ContentFeedUrl,
+          enabled: calendarDraft.enabled,
+          label: calendarDraft.label,
+          timezone: calendarDraft.timezone,
+        });
+        nextCalendarConfig = calendarResult.config;
+        setOrgCalendarConfig(calendarResult.config);
+        setCalendarDraft(calendarResult.config);
+      }
+
+      localStorage.setItem(scopedKey(currentUser.uid, 'sheet_url'), sheetUrl.trim());
+      localStorage.setItem(scopedKey(currentUser.uid, 'report_gender'), reportGender);
+      localStorage.setItem(scopedKey(currentUser.uid, 'report_emojis'), JSON.stringify(reportEmojis));
+      localStorage.setItem(scopedKey(currentUser.uid, 'drive_folder_id'), driveFolderId.trim());
+      localStorage.setItem(scopedKey(currentUser.uid, 'auto_hover_expand'), JSON.stringify(autoHoverExpand));
+
+      const titleVal = customTitleDraft.trim() || null;
+      const nextSettings = {
+        autoHoverExpand,
+        driveFolderId: driveFolderId.trim(),
+        sheetUrl: sheetUrl.trim(),
+        reportGender,
+        reportEmojis,
+      };
+      await setDoc(doc(db, 'users', currentUser.uid), {
+        customTitle: titleVal,
+        settings: nextSettings,
+        updatedAt: Date.now(),
+      }, { merge: true });
+
+      setUserProfile((prev) => (
+        prev
+          ? {
+              ...prev,
+              customTitle: titleVal || undefined,
+              settings: nextSettings,
+            }
+          : prev
+      ));
+      setShowSettings(false);
+      setCalendarError(nextCalendarConfig.lastError || '');
+      showToast('บันทึก Settings แล้ว');
+    } catch (error) {
+      showToast(`บันทึก Settings ไม่สำเร็จ: ${(error as Error).message}`);
+    }
   };
 
   // ── KPI Config save — per user (stored by uid)
@@ -2821,11 +2933,15 @@ export default function App() {
   if (!currentUser || !userProfile) return <AuthLoadingScreen />;
 
   const todayEntries   = entries.filter((e) => e.user === currentUser.uid && e.date === getTodayStr());
+  const todayCalendarEvents = calendarEvents.filter(
+    (event) => dateKeyInTimezone(event.start, orgCalendarConfig.timezone) === getTodayStr(),
+  );
   const historyEntries = entries.filter((e) => e.user === currentUser.uid);
   const historyDates   = Array.from<string>(new Set(historyEntries.map((e) => e.date))).sort((a, b) => b.localeCompare(a));
   const navItems: Array<{ key: TabType; label: string; icon: React.ReactNode }> = [
     { key: 'log', label: 'บันทึก', icon: <PlusCircle size={20} /> },
     { key: 'today', label: 'วันนี้', icon: <Clock size={20} /> },
+    { key: 'calendar', label: 'Calendar', icon: <CalendarIcon size={20} /> },
     { key: 'history', label: 'ประวัติ', icon: <History size={20} /> },
     { key: 'daily', label: 'รายงาน', icon: <FileText size={20} /> },
     { key: 'summary', label: 'สรุป', icon: <BarChart3 size={20} /> },
@@ -2836,7 +2952,7 @@ export default function App() {
 
   // ─── MAIN APP ───────────────────────────────────────────────────────────────
   return (
-    <div className="flex flex-col h-screen max-w-md mx-auto bg-[#FDFAF7] text-[#2C2A28] relative overflow-hidden" style={{ height: '100dvh' }}>
+    <div className="relative mx-auto flex h-screen w-full max-w-[1180px] flex-col overflow-hidden bg-[#FDFAF7] text-[#2C2A28]" style={{ height: '100dvh' }}>
       <Toast {...toast} />
 
       {/* KPI Editor (Phase 5) */}
@@ -3036,383 +3152,52 @@ export default function App() {
       </Modal>
 
       {/* Settings Modal */}
-      <Modal isOpen={showSettings} onClose={() => setShowSettings(false)} title="Settings">
-        <div className="space-y-4">
-          {/* Firebase Status */}
-          <div className={`px-4 py-3.5 rounded-2xl border flex items-center gap-3 ${isOnline ? 'bg-emerald-50 border-emerald-100' : 'bg-rose-50 border-rose-100'}`}>
-            {isOnline
-              ? <Wifi size={16} className="text-emerald-500 shrink-0" />
-              : <WifiOff size={16} className="text-rose-400 shrink-0" />
-            }
-            <div>
-              <p className={`text-[9px] font-bold uppercase tracking-widest ${isOnline ? 'text-emerald-500' : 'text-rose-400'}`}>
-                Firebase Firestore
-              </p>
-              <p className="text-[12px] font-semibold text-[#2C2A28]">
-                {isOnline ? 'เชื่อมต่อแล้ว · jartrack-y8pv' : 'ไม่มีสัญญาณอินเตอร์เน็ต'}
-              </p>
-            </div>
-          </div>
-
-          {/* Google Account info */}
-          <div className="px-4 py-3.5 bg-blue-50 border border-blue-100 rounded-2xl flex items-center gap-3">
-            {currentUser.photoURL ? (
-              <img
-                src={currentUser.photoURL}
-                alt="avatar"
-                className="w-10 h-10 rounded-full shrink-0 object-cover"
-              />
-            ) : (
-              <div className="w-10 h-10 bg-blue-100 rounded-full flex items-center justify-center shrink-0">
-                <UserCircle size={22} className="text-blue-400" />
-              </div>
-            )}
-            <div className="flex-1 min-w-0">
-              <p className="text-[9px] font-bold text-blue-500 uppercase tracking-widest mb-0.5">Google Account</p>
-              <p className="text-[14px] font-bold text-[#2C2A28] truncate">{currentUser.displayName || 'User'}</p>
-              <p className="text-[10px] text-slate-400 truncate">{currentUser.email}</p>
-            </div>
-          </div>
-
-          {/* Nickname */}
-          <div className="space-y-1.5">
-            <label className="text-[10px] font-bold text-slate-400 tracking-widest uppercase">
-              ชื่อเล่น (ใช้ตั้งชื่อ Sheet / Report)
-            </label>
-            <input
-              type="text"
-              value={nicknameDraft}
-              onChange={(e) => setNicknameDraft(e.target.value)}
-              maxLength={40}
-              className="w-full px-4 py-3.5 bg-slate-50 border border-slate-100 rounded-2xl text-[13px] outline-none"
-              placeholder="เช่น Gift"
-            />
-          </div>
-
-          {/* Custom title */}
-          <div className="space-y-1.5">
-            <label className="text-[10px] font-bold text-slate-400 tracking-widest uppercase">
-              ชื่อตำแหน่ง (แสดงบนแอพ)
-            </label>
-            <input
-              type="text"
-              value={customTitleDraft}
-              onChange={(e) => setCustomTitleDraft(e.target.value)}
-              maxLength={40}
-              className="w-full px-4 py-3.5 bg-slate-50 border border-slate-100 rounded-2xl text-[13px] font-bold outline-none"
-              placeholder={ROLE_DEFAULTS[userProfile?.role || '']?.meta.label || 'ตำแหน่งงาน...'}
-            />
-          </div>
-
-          <div className="space-y-1.5">
-            <label className="text-[10px] font-bold text-slate-400 tracking-widest uppercase">
-              คำลงท้าย Daily Report
-            </label>
-            <div className="grid grid-cols-2 gap-2">
-              <button
-                type="button"
-                onClick={() => setReportGender('male')}
-                className={`py-3 rounded-2xl border transition-colors flex items-center justify-center gap-2 ${
-                  reportGender === 'male'
-                    ? 'bg-orange-500 text-white border-orange-500'
-                    : 'bg-slate-50 text-slate-500 border-slate-100'
-                }`}
-                aria-label="เลือกคำลงท้ายแบบผู้ชาย"
-              >
-                <span className="text-[18px] leading-none">♂</span>
-                <span className="text-[11px] font-bold">ครับ</span>
-              </button>
-              <button
-                type="button"
-                onClick={() => setReportGender('female')}
-                className={`py-3 rounded-2xl border transition-colors flex items-center justify-center gap-2 ${
-                  reportGender === 'female'
-                    ? 'bg-pink-500 text-white border-pink-500'
-                    : 'bg-slate-50 text-slate-500 border-slate-100'
-                }`}
-                aria-label="เลือกคำลงท้ายแบบผู้หญิง"
-              >
-                <span className="text-[18px] leading-none">♀</span>
-                <span className="text-[11px] font-bold">ค่ะ</span>
-              </button>
-            </div>
-          </div>
-
-          <div className="space-y-2">
-            <label className="text-[10px] font-bold text-slate-400 tracking-widest uppercase">
-              Emoji หัวข้อ Daily Report
-            </label>
-            <div className="grid grid-cols-2 gap-2">
-              {[
-                { key: 'focus', label: 'Focus' },
-                { key: 'routine', label: 'Routine' },
-                { key: 'results', label: 'Results' },
-                { key: 'nextMove', label: 'Next Move' },
-                { key: 'issues', label: 'Issues' },
-              ].map((field) => (
-                <div key={field.key} className={field.key === 'issues' ? 'col-span-2' : ''}>
-                  <label className="block text-[9px] font-bold text-slate-400 uppercase tracking-widest mb-1.5">
-                    {field.label}
-                  </label>
-                  <input
-                    type="text"
-                    value={reportEmojis[field.key as keyof typeof reportEmojis]}
-                    onChange={(e) => {
-                      const value = e.target.value.slice(0, 4) || DEFAULT_REPORT_EMOJIS[field.key as keyof typeof DEFAULT_REPORT_EMOJIS];
-                      setReportEmojis((prev) => ({ ...prev, [field.key]: value }));
-                    }}
-                    className="w-full px-4 py-3.5 bg-slate-50 border border-slate-100 rounded-2xl text-[16px] font-semibold outline-none"
-                    placeholder={DEFAULT_REPORT_EMOJIS[field.key as keyof typeof DEFAULT_REPORT_EMOJIS]}
-                  />
-                </div>
-              ))}
-            </div>
-          </div>
-
-          {/* Google Sheet URL */}
-          <div className="space-y-1.5">
-            <label className="text-[10px] font-bold text-slate-400 tracking-widest uppercase">Google Sheet URL</label>
-            <input
-              type="text"
-              value={sheetUrl}
-              onChange={(e) => setSheetUrl(e.target.value)}
-              className="w-full px-4 py-3.5 bg-slate-50 border border-slate-100 rounded-2xl text-[13px] outline-none"
-              placeholder="https://docs.google.com/..."
-            />
-          </div>
-
-          {/* Backend sync status */}
-          <div className="space-y-1.5">
-            <label className="text-[10px] font-bold text-slate-400 tracking-widest uppercase">
-              Sheets Sync Backend
-            </label>
-            <div className={`px-4 py-3 rounded-2xl border flex items-center gap-2.5 ${
-              latestSyncState?.status === 'failed'
-                ? 'bg-rose-50 border-rose-100'
-                : latestSyncState?.status === 'pending'
-                  ? 'bg-amber-50 border-amber-100'
-                  : 'bg-emerald-50 border-emerald-100'
-            }`}>
-              <span className="text-[15px]">
-                {latestSyncState?.status === 'failed' ? '⚠️' : latestSyncState?.status === 'pending' ? '⏳' : '✅'}
-              </span>
-              <div>
-                <p className={`text-[11px] font-bold ${
-                  latestSyncState?.status === 'failed'
-                    ? 'text-rose-700'
-                    : latestSyncState?.status === 'pending'
-                      ? 'text-amber-700'
-                      : 'text-emerald-700'
-                }`}>
-                  {latestSyncState?.status === 'failed'
-                    ? 'Backend sync มีปัญหา'
-                    : latestSyncState?.status === 'pending'
-                      ? 'กำลัง sync ไป Google Sheets'
-                      : 'Backend sync พร้อมใช้งาน'}
-                </p>
-                <p className="text-[9px] text-slate-400">
-                  {latestSyncState?.lastError || 'ระบบใช้ Firestore เป็น source of truth และ sync ผ่าน Cloud Functions'}
-                </p>
-              </div>
-            </div>
-          </div>
-
-          {/* Google Drive Attachment */}
-          <div className="space-y-1.5">
-            <label className="text-[10px] font-bold text-slate-400 tracking-widest uppercase">
-              Google Drive Attachments
-            </label>
-            <button
-              onClick={handleConnectGoogleDrive}
-              className="w-full py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-[11px] font-bold text-slate-500 flex items-center justify-center gap-1.5 active:bg-emerald-50 transition-colors"
-            >
-              <Upload size={13} />
-              {googleAccessToken && Date.now() < googleAccessTokenExpiry
-                ? 'เชื่อม Google Drive แล้ว'
-                : 'เชื่อม Google Drive เพื่ออัปโหลดไฟล์'}
-            </button>
-            <input
-              type="text"
-              value={driveFolderId}
-              onChange={(e) => setDriveFolderId(e.target.value)}
-              className="w-full px-4 py-3.5 bg-slate-50 border border-slate-100 rounded-2xl text-[12px] outline-none"
-              placeholder="Drive Folder ID (ไม่บังคับ)"
-            />
-            {driveFolderId.trim() && (
-              <button
-                onClick={() => window.open(`https://drive.google.com/drive/folders/${driveFolderId.trim()}`, '_blank')}
-                className="w-full py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-[11px] font-bold text-slate-500 flex items-center justify-center gap-1.5 active:bg-emerald-50 transition-colors"
-              >
-                <ExternalLink size={13} /> เปิดโฟลเดอร์ Drive ที่ตั้งไว้
-              </button>
-            )}
-            <div className={`px-3.5 py-3 rounded-xl border ${firebaseConfigHealthy ? 'bg-emerald-50 border-emerald-100' : 'bg-amber-50 border-amber-100'}`}>
-              <div className="flex items-start gap-2.5">
-                {firebaseConfigHealthy ? (
-                  <CheckCircle2 size={14} className="text-emerald-500 mt-0.5 shrink-0" />
-                ) : (
-                  <AlertTriangle size={14} className="text-amber-500 mt-0.5 shrink-0" />
-                )}
-                <div className="min-w-0">
-                  <p className={`text-[10px] font-bold uppercase tracking-wider ${firebaseConfigHealthy ? 'text-emerald-600' : 'text-amber-700'}`}>
-                    Drive Preflight
-                  </p>
-                  <p className="text-[11px] text-slate-600 break-all">Project: {runtimeProjectId || '(missing)'}</p>
-                  <p className="text-[11px] text-slate-600 break-all">Auth Domain: {runtimeAuthDomain || '(missing)'}</p>
-                  <p className="text-[10px] text-slate-500 mt-1">
-                    ค่าที่คาดหวัง: {EXPECTED_FIREBASE_PROJECT} / {EXPECTED_FIREBASE_AUTH_DOMAIN}
-                  </p>
-                </div>
-              </div>
-              <div className="grid grid-cols-2 gap-2 mt-2.5">
-                <button
-                  onClick={() => window.open('https://console.cloud.google.com/apis/library/drive.googleapis.com?project=jartrack-y8pv', '_blank')}
-                  className="py-2 bg-white border border-slate-200 rounded-lg text-[10px] font-bold text-slate-600"
-                >
-                  Drive API
-                </button>
-                <button
-                  onClick={() => window.open('https://console.cloud.google.com/apis/credentials/consent?project=jartrack-y8pv', '_blank')}
-                  className="py-2 bg-white border border-slate-200 rounded-lg text-[10px] font-bold text-slate-600"
-                >
-                  OAuth Screen
-                </button>
-              </div>
-            </div>
-          </div>
-
-          {/* Google Calendar iCal — Y8 */}
-          <div className="space-y-1.5">
-            <label className="text-[10px] font-bold tracking-widest uppercase" style={{ color: '#F4823C' }}>
-              Google Calendar iCal · Y8
-            </label>
-            <input
-              type="text"
-              value={calY8Url}
-              onChange={(e) => setCalY8Url(e.target.value)}
-              className="w-full px-4 py-3.5 bg-slate-50 border border-slate-100 rounded-2xl text-[12px] outline-none"
-              placeholder="https://calendar.google.com/calendar/ical/...ics"
-            />
-          </div>
-
-          {/* Google Calendar iCal — PV */}
-          <div className="space-y-1.5">
-            <label className="text-[10px] font-bold tracking-widest uppercase" style={{ color: '#E87AA5' }}>
-              Google Calendar iCal · PV
-            </label>
-            <input
-              type="text"
-              value={calPvUrl}
-              onChange={(e) => setCalPvUrl(e.target.value)}
-              className="w-full px-4 py-3.5 bg-slate-50 border border-slate-100 rounded-2xl text-[12px] outline-none"
-              placeholder="https://calendar.google.com/calendar/ical/...ics"
-            />
-          </div>
-
-          {/* Role Badge */}
-          {userProfile && (
-            <div className="flex items-center justify-between px-4 py-3 bg-slate-50 rounded-2xl border border-slate-100">
-              <div className="flex items-center gap-2">
-                <span className="text-lg">{ROLE_EMOJI[userProfile.role] || '⚙️'}</span>
-                <div>
-                  <p className="text-[9px] font-bold text-slate-400 uppercase tracking-widest">ตำแหน่ง</p>
-                  <p className="text-[13px] font-bold text-[#2C2A28]">
-                    {ROLE_DEFAULTS[userProfile.role]?.meta.label || userProfile.role}
-                  </p>
-                </div>
-              </div>
-              <div className="text-right">
-                <p className="text-[9px] font-bold text-slate-400 uppercase tracking-widest">Target/เดือน</p>
-                <p className="text-[13px] font-bold text-[#F4823C]">{monthlyTarget} Cr.</p>
-              </div>
-            </div>
-          )}
-
-          <div className="px-4 py-2.5 rounded-2xl bg-amber-50 border border-amber-100 text-[11px] text-amber-700">
-            Role ถูกกำหนดตามอีเมลอัตโนมัติ: host = Graphic Designer, info.nakoleo = Art Director (Admin), อื่นๆ = Custom
-          </div>
-
-          {/* KPI Config button (Phase 4/5) */}
-          <button
-            onClick={() => { setShowSettings(false); setShowKpiEditor(true); }}
-            className="w-full py-3.5 bg-slate-50 border border-slate-200 rounded-2xl font-bold text-[13px] text-[#2C2A28] flex items-center justify-center gap-2.5 active:bg-orange-50 transition-colors"
-          >
-            <Sliders size={15} /> จัดการ KPI Config (Role ของฉัน)
-          </button>
-
-          <div className="px-4 py-2.5 rounded-2xl bg-violet-50 border border-violet-100 text-[11px] text-violet-700">
-            AI Summary ถูกย้ายไปประมวลผลบน backend แล้ว จึงไม่ต้องเก็บ API key ไว้ในอุปกรณ์ผู้ใช้อีกต่อไป
-          </div>
-
-          {/* ── Auto-hover toggle */}
-          <div className="flex items-center justify-between px-4 py-3 bg-slate-50 rounded-2xl border border-slate-100">
-            <div>
-              <p className="text-[12px] font-bold text-[#2C2A28]">แสดงงานอัตโนมัติเมื่อ hover</p>
-              <p className="text-[9px] text-slate-400">เลื่อนเมาส์บนกลุ่ม → งานแสดงทันที</p>
-            </div>
-            <button
-              onClick={() => setAutoHoverExpand(v => !v)}
-              className="relative w-11 h-6 rounded-full transition-colors duration-200 shrink-0"
-              style={{ background: autoHoverExpand ? '#F4823C' : '#E2E8F0' }}
-            >
-              <div
-                className="absolute top-1 w-4 h-4 bg-white rounded-full shadow transition-all duration-200"
-                style={{ left: autoHoverExpand ? '1.375rem' : '0.25rem' }}
-              />
-            </button>
-          </div>
-
-          <div className="flex gap-3">
-            <button
-              onClick={handleSignOut}
-              className="flex-1 py-4 bg-rose-50 text-rose-500 rounded-2xl font-bold text-[13px] border border-rose-100 flex items-center justify-center gap-2"
-            >
-              <LogOut size={15} /> Logout
-            </button>
-            <button
-              onClick={async () => {
-                if (!currentUser) return;
-                const ok = await handleSaveNickname(nicknameDraft);
-                if (!ok) return;
-                localStorage.setItem(scopedKey(currentUser.uid, 'sheet_url'), sheetUrl.trim());
-                localStorage.setItem(scopedKey(currentUser.uid, 'report_gender'), reportGender);
-                localStorage.setItem(scopedKey(currentUser.uid, 'report_emojis'), JSON.stringify(reportEmojis));
-                // ── Persist settings + customTitle to Firestore
-                try {
-                  const titleVal = customTitleDraft.trim() || null;
-                  await setDoc(doc(db, 'users', currentUser.uid), {
-                    customTitle: titleVal,
-                    settings: {
-                      autoHoverExpand,
-                      calY8Url:      calY8Url.trim(),
-                      calPvUrl:      calPvUrl.trim(),
-                      driveFolderId: driveFolderId.trim(),
-                      sheetUrl:      sheetUrl.trim(),
-                      reportGender,
-                      reportEmojis,
-                    },
-                    updatedAt: Date.now(),
-                  }, { merge: true });
-                  setUserProfile(prev => prev ? { ...prev, customTitle: titleVal || undefined,
-                    settings: { autoHoverExpand, calY8Url: calY8Url.trim(), calPvUrl: calPvUrl.trim(),
-                      driveFolderId: driveFolderId.trim(), sheetUrl: sheetUrl.trim(), reportGender, reportEmojis,
-                    } } : prev);
-                } catch { /* non-critical */ }
-                setShowSettings(false);
-                showToast('บันทึก Config แล้ว');
-              }}
-              className="flex-[2] py-4 text-white rounded-2xl font-bold text-[13px] glow-orange"
-              style={{ background: 'linear-gradient(135deg, #F4823C, #F5A855)' }}
-            >
-              Save
-            </button>
-          </div>
-        </div>
+      <Modal isOpen={showSettings} onClose={() => setShowSettings(false)} title="Settings" maxWidthClassName="max-w-5xl">
+        <SettingsPanel
+          currentUser={currentUser}
+          userProfile={userProfile}
+          nicknameDraft={nicknameDraft}
+          setNicknameDraft={setNicknameDraft}
+          customTitleDraft={customTitleDraft}
+          setCustomTitleDraft={setCustomTitleDraft}
+          reportGender={reportGender}
+          setReportGender={setReportGender}
+          reportEmojis={reportEmojis}
+          setReportEmojis={setReportEmojis}
+          sheetUrl={sheetUrl}
+          setSheetUrl={setSheetUrl}
+          driveFolderId={driveFolderId}
+          setDriveFolderId={setDriveFolderId}
+          googleAccessToken={googleAccessToken}
+          googleAccessTokenExpiry={googleAccessTokenExpiry}
+          handleConnectGoogleDrive={handleConnectGoogleDrive}
+          latestSyncState={latestSyncState}
+          isOnline={isOnline}
+          isSuperAdmin={isSuperAdmin}
+          orgCalendarConfig={orgCalendarConfig}
+          calendarDraft={calendarDraft}
+          setCalendarDraft={setCalendarDraft}
+          calendarActionLoading={calendarActionLoading}
+          onValidateCalendar={handleValidateCalendar}
+          onSave={handleSaveSettings}
+          onSignOut={handleSignOut}
+          openKpiEditor={() => {
+            setShowSettings(false);
+            setShowKpiEditor(true);
+          }}
+          runtimeProjectId={runtimeProjectId}
+          runtimeAuthDomain={runtimeAuthDomain}
+          firebaseConfigHealthy={firebaseConfigHealthy}
+          autoHoverExpand={autoHoverExpand}
+          setAutoHoverExpand={setAutoHoverExpand}
+          monthlyTarget={monthlyTarget}
+        />
       </Modal>
 
       {/* ─── HEADER ─────────────────────────────────────────────────────────── */}
-      <header className="px-5 pt-[calc(3.25rem+env(safe-area-inset-top))] pb-5 header-gradient shadow-sm shrink-0">
-        <div className="flex justify-between items-center mb-4">
+      <header className="header-gradient shrink-0 px-5 pt-[calc(3.25rem+env(safe-area-inset-top))] pb-5 shadow-sm">
+        <div className="mx-auto w-full max-w-[1080px]">
+        <div className="mb-4 flex items-center justify-between">
           <div className="flex items-center gap-3">
             {/* Mini App Icon */}
             <div className="w-9 h-9 rounded-[13px] overflow-hidden shadow-md border border-white/70 shrink-0">
@@ -3460,10 +3245,12 @@ export default function App() {
             <p className="text-[8px] text-white/60 font-medium">credits</p>
           </div>
         </div>
+        </div>
       </header>
 
       {/* ─── MAIN CONTENT ───────────────────────────────────────────────────── */}
       <main className="flex-1 overflow-y-auto px-5 py-5 pb-[calc(7rem+env(safe-area-inset-bottom))]" style={{ WebkitOverflowScrolling: 'touch' } as React.CSSProperties}>
+        <div className="mx-auto w-full max-w-[1080px]">
 
         {activeTab === 'log' && (
           <LogTab
@@ -3511,12 +3298,20 @@ export default function App() {
             setDeleteId={setDeleteId}
             showToast={showToast}
             EntryCardComponent={EntryCard}
-            calY8Url={calY8Url}
-            calPvUrl={calPvUrl}
-            showCalSection={showCalSection}
-            setShowCalSection={setShowCalSection}
-            calLoading={calLoading}
-            calEvents={calEvents}
+            calendarEnabled={orgCalendarConfig.enabled}
+            calendarLoading={calendarLoading}
+            calendarError={calendarError}
+            calendarEvents={todayCalendarEvents}
+            openCalendarTab={() => setActiveTab('calendar')}
+          />
+        )}
+
+        {activeTab === 'calendar' && (
+          <CalendarTab
+            config={orgCalendarConfig}
+            events={calendarEvents}
+            loading={calendarLoading}
+            error={calendarError}
           />
         )}
 
@@ -3607,6 +3402,7 @@ export default function App() {
             handleDeleteAdminUser={handleDeleteAdminUser}
           />
         )}
+        </div>
       </main>
 
       {/* ─── RENAME BEFORE UPLOAD MODAL ──────────────────────────────────────── */}
@@ -3696,7 +3492,7 @@ export default function App() {
       })()}
 
       {/* ─── BOTTOM NAV ─────────────────────────────────────────────────────── */}
-      <nav className="fixed bottom-0 left-0 right-0 max-w-md mx-auto bg-white/95 backdrop-blur-xl border-t border-slate-100/80 z-[60] shadow-2xl flex flex-col items-center">
+      <nav className="fixed bottom-0 left-0 right-0 mx-auto flex w-full max-w-[1180px] flex-col items-center border-t border-slate-100/80 bg-white/95 shadow-2xl backdrop-blur-xl z-[60]">
         <div
           className="grid items-start w-full px-2 pt-3 pb-2 gap-1"
           style={{ gridTemplateColumns: `repeat(${navItems.length}, minmax(0, 1fr))` }}
