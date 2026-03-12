@@ -1,14 +1,6 @@
 import React from 'react';
-import { Calendar as CalendarIcon, ChevronDown, Clock } from 'lucide-react';
-import type { WorkEntry, WorkGroups } from '@/domain/types';
-
-interface CalendarEvent {
-  uid: string;
-  title: string;
-  start: Date;
-  end: Date;
-  brand: 'y8' | 'pv';
-}
+import { Calendar as CalendarIcon, Clock } from 'lucide-react';
+import type { NormalizedCalendarEvent, WorkEntry, WorkGroups } from '@/domain/types';
 
 interface TodayTabProps {
   todayLabel: string;
@@ -18,12 +10,11 @@ interface TodayTabProps {
   setDeleteId: React.Dispatch<React.SetStateAction<string | null>>;
   showToast: (message: string) => void;
   EntryCardComponent: React.ComponentType<any>;
-  calY8Url: string;
-  calPvUrl: string;
-  showCalSection: boolean;
-  setShowCalSection: React.Dispatch<React.SetStateAction<boolean>>;
-  calLoading: boolean;
-  calEvents: CalendarEvent[];
+  calendarEnabled: boolean;
+  calendarLoading: boolean;
+  calendarError: string;
+  calendarEvents: NormalizedCalendarEvent[];
+  openCalendarTab: () => void;
 }
 
 export function TodayTab({
@@ -34,12 +25,11 @@ export function TodayTab({
   setDeleteId,
   showToast,
   EntryCardComponent,
-  calY8Url,
-  calPvUrl,
-  showCalSection,
-  setShowCalSection,
-  calLoading,
-  calEvents,
+  calendarEnabled,
+  calendarLoading,
+  calendarError,
+  calendarEvents,
+  openCalendarTab,
 }: TodayTabProps) {
   return (
     <div className="space-y-3.5 animate-in fade-in slide-in-from-bottom-2 duration-300">
@@ -64,51 +54,48 @@ export function TodayTab({
         </div>
       )}
 
-      {(calY8Url || calPvUrl) && (
-        <div className="mt-2">
-          <button
-            onClick={() => setShowCalSection((current) => !current)}
-            className="w-full flex items-center justify-between px-4 py-3 bg-white rounded-[18px] border border-slate-100 shadow-sm active:bg-slate-50 transition-colors"
-          >
-            <div className="flex items-center gap-2">
-              <CalendarIcon size={14} className="text-slate-300" />
-              <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">กำหนดการ</span>
-              {calLoading && <span className="text-[9px] text-slate-300 pulse-soft ml-1">กำลังโหลด...</span>}
+      {calendarEnabled && (
+        <section className="panel-card rounded-[24px] p-4 sm:p-5">
+          <div className="flex items-start justify-between gap-3">
+            <div>
+              <div className="flex items-center gap-2">
+                <CalendarIcon size={14} className="text-[#F4823C]" />
+                <p className="section-kicker">Y8 Calendar</p>
+              </div>
+              <p className="mt-2 text-[14px] font-semibold text-[#2C2A28]">Content calendar และ product launch</p>
             </div>
-            <ChevronDown size={14} className={`text-slate-300 transition-transform duration-200 ${showCalSection ? 'rotate-180' : ''}`} />
-          </button>
-          {showCalSection && (
-            <div className="mt-2 space-y-2 animate-in fade-in duration-200">
-              {calEvents.length === 0 && !calLoading ? (
-                <p className="text-center text-[10px] text-slate-300 py-4">ไม่มีกำหนดการวันนี้</p>
-              ) : (
-                calEvents.map((event) => (
-                  <div
-                    key={event.uid}
-                    className="flex items-start gap-3 px-4 py-3 bg-white rounded-[16px] border shadow-sm"
-                    style={{ borderColor: event.brand === 'y8' ? 'rgba(244,130,60,0.25)' : 'rgba(232,122,165,0.25)' }}
-                  >
-                    <div className="w-2 h-2 rounded-full mt-1.5 shrink-0" style={{ background: event.brand === 'y8' ? '#F4823C' : '#E87AA5' }} />
-                    <div className="flex-1 min-w-0">
-                      <p className="font-bold text-[#2C2A28] text-[12px] leading-tight">{event.title}</p>
-                      <p className="text-[9px] text-slate-400 mt-0.5">
-                        {event.start.toLocaleTimeString('th-TH', { hour: '2-digit', minute: '2-digit' })}
-                        {' – '}
-                        {event.end.toLocaleTimeString('th-TH', { hour: '2-digit', minute: '2-digit' })}
-                      </p>
+            <button onClick={openCalendarTab} className="btn-secondary rounded-2xl px-3 py-2 text-[11px] font-bold">
+              เปิด Calendar
+            </button>
+          </div>
+
+          <div className="mt-4 space-y-2.5">
+            {calendarLoading ? (
+              <p className="text-[12px] text-slate-500">กำลังโหลดกำหนดการ...</p>
+            ) : calendarError ? (
+              <p className="text-[12px] text-rose-600">{calendarError}</p>
+            ) : calendarEvents.length === 0 ? (
+              <p className="text-[12px] text-slate-500">วันนี้ยังไม่มีกำหนดการจากปฏิทินกลาง</p>
+            ) : (
+              calendarEvents.slice(0, 3).map((event) => (
+                <article key={event.id} className="rounded-[18px] border border-slate-200 bg-white px-4 py-3">
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className={`calendar-kind ${event.kind}`}>{event.kind}</span>
+                        {event.product && <span className="calendar-meta">{event.product}</span>}
+                      </div>
+                      <p className="mt-2 text-[13px] font-semibold leading-6 text-[#2C2A28]">{event.title}</p>
                     </div>
-                    <span
-                      className="text-[8px] font-black px-1.5 py-0.5 rounded text-white shrink-0"
-                      style={{ background: event.brand === 'y8' ? '#F4823C' : '#E87AA5' }}
-                    >
-                      {event.brand.toUpperCase()}
-                    </span>
+                    <div className="text-right text-[11px] text-slate-500">
+                      {event.launchDate || (event.allDay ? 'All day' : new Date(event.start).toLocaleTimeString('th-TH', { hour: '2-digit', minute: '2-digit' }))}
+                    </div>
                   </div>
-                ))
-              )}
-            </div>
-          )}
-        </div>
+                </article>
+              ))
+            )}
+          </div>
+        </section>
       )}
     </div>
   );

@@ -72,16 +72,16 @@ export function LogTab({
   isLoading,
 }: LogTabProps) {
   return (
-    <div className="space-y-4 animate-in fade-in slide-in-from-bottom-2 duration-300">
-      <section className="bg-white p-5 rounded-[24px] shadow-sm border border-slate-100/80">
-        <div className="flex items-center gap-2 mb-5">
-          <CalendarIcon size={14} className="text-slate-300" />
-          <h3 className="font-bold text-[#2C2A28] text-[11px] uppercase tracking-widest">บันทึกงานใหม่</h3>
+    <div className="space-y-5 animate-in fade-in slide-in-from-bottom-2 duration-300">
+      <section className="panel-card rounded-[26px] p-5 sm:p-6">
+        <div className="mb-5 flex items-center gap-2">
+          <CalendarIcon size={14} className="text-slate-400" />
+          <h3 className="text-[12px] font-bold uppercase tracking-[0.18em] text-[#2C2A28]">บันทึกงาน</h3>
         </div>
 
-        <div className="space-y-4">
+        <div className="space-y-5">
           <div className="space-y-1.5">
-            <label className="text-[9px] font-bold text-slate-400 uppercase tracking-widest">วันที่</label>
+            <label className="section-kicker">วันที่</label>
             <input
               type="date"
               value={selectedDate}
@@ -91,7 +91,7 @@ export function LogTab({
           </div>
 
           <div className="space-y-2">
-            <label className="text-[9px] font-bold text-slate-400 uppercase tracking-widest">กลุ่มงาน</label>
+            <label className="section-kicker">กลุ่มงาน</label>
             <div className="space-y-2">
               {orderedGroupKeys.map((key) => {
                 const grp = kpiConfig[key];
@@ -189,7 +189,7 @@ export function LogTab({
 
           <div className="flex gap-3 items-end">
             <div className="flex-1 space-y-1.5">
-              <label className="text-[9px] font-bold text-slate-400 uppercase tracking-widest">จำนวน ({currentTask?.unit})</label>
+              <label className="section-kicker">จำนวน ({currentTask?.unit})</label>
               <div className="flex items-center bg-slate-50 border border-slate-200 rounded-xl overflow-hidden">
                 <button
                   onClick={() => setQuantity(Math.max(1, quantity - 1))}
@@ -207,8 +207,8 @@ export function LogTab({
               </div>
             </div>
             <div className="space-y-1.5">
-              <label className="text-[9px] font-bold text-slate-400 uppercase tracking-widest">Credits</label>
-              <div className="h-11 px-4 rounded-xl flex items-center justify-center gap-1 min-w-[76px]" style={{ background: 'linear-gradient(135deg, #F4823C, #F5A855)' }}>
+              <label className="section-kicker">Credits</label>
+              <div className="h-11 min-w-[76px] rounded-xl px-4 flex items-center justify-center gap-1" style={{ background: 'linear-gradient(135deg, #F4823C, #F5A855)' }}>
                 <span className="text-[22px] font-light text-white">{quantity * (currentTask?.creditPerUnit || 1)}</span>
                 <span className="text-[9px] text-white/60 mt-1">Cr.</span>
               </div>
@@ -216,22 +216,18 @@ export function LogTab({
           </div>
 
           <div className="space-y-1.5">
-            <label className="text-[9px] font-bold text-slate-400 uppercase tracking-widest">
-              หมายเหตุ <span className="normal-case font-normal">(ไม่บังคับ)</span>
-            </label>
+            <label className="section-kicker">หมายเหตุ</label>
             <textarea
               value={notes}
               onChange={(e) => setNotes(e.target.value)}
-              placeholder="เพิ่มรายละเอียด..."
+              placeholder="เพิ่มรายละเอียด"
               rows={2}
               className="w-full px-4 py-3 bg-[#FDFAF7] border border-slate-200 rounded-xl text-[13px] outline-none resize-none text-[#2C2A28] placeholder:text-slate-300"
             />
           </div>
 
           <div className="space-y-2">
-            <label className="text-[9px] font-bold text-slate-400 uppercase tracking-widest">
-              📎 แนบงาน <span className="normal-case font-normal opacity-60">(ไม่บังคับ)</span>
-            </label>
+            <label className="section-kicker">แนบงาน</label>
 
             <div className="relative">
               <span className="absolute left-3 top-1/2 -translate-y-1/2 text-[9px] font-black text-white px-1.5 py-0.5 rounded pointer-events-none" style={{ background: '#7C3AED' }}>C</span>
@@ -279,7 +275,7 @@ export function LogTab({
               <button
                 onClick={() => logDriveInputRef.current?.click()}
                 disabled={driveUploading}
-                className={`py-2.5 bg-[#FDFAF7] border border-slate-200 rounded-xl text-[11px] font-bold text-slate-500 flex items-center justify-center gap-1.5 active:bg-emerald-50 transition-colors ${driveUploading ? 'opacity-60' : ''}`}
+                className={`btn-secondary py-2.5 rounded-xl text-[11px] font-bold flex items-center justify-center gap-1.5 ${driveUploading ? 'opacity-60' : ''}`}
               >
                 {driveUploading ? <RefreshCw size={13} className="animate-spin" /> : <Upload size={13} />}
                 {driveUploading ? 'กำลังอัปโหลด...' : 'อัปโหลด Drive'}
@@ -288,7 +284,7 @@ export function LogTab({
                 onClick={() => {
                   void handlePickLocalFile();
                 }}
-                className="py-2.5 bg-[#FDFAF7] border border-slate-200 rounded-xl text-[11px] font-bold text-slate-500 flex items-center justify-center gap-1.5 active:bg-teal-50 transition-colors"
+                className="btn-secondary py-2.5 rounded-xl text-[11px] font-bold flex items-center justify-center gap-1.5"
               >
                 <FileText size={13} /> ไฟล์ในเครื่อง
               </button>
@@ -318,8 +314,7 @@ export function LogTab({
           <button
             onClick={handleAddEntry}
             disabled={isLoading}
-            className={`w-full py-4 text-white rounded-xl font-bold text-[13px] tracking-[0.15em] shadow-md active:scale-95 transition-all glow-orange ${isLoading ? 'opacity-60' : ''}`}
-            style={{ background: 'linear-gradient(135deg, #F4823C, #F5A855)' }}
+            className={`btn-primary w-full rounded-[18px] py-4 text-[13px] font-bold tracking-[0.12em] active:scale-[0.99] ${isLoading ? 'opacity-60' : ''}`}
           >
             {isLoading ? <RefreshCw className="animate-spin mx-auto" size={18} /> : 'บันทึกข้อมูล'}
           </button>

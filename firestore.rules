@@ -36,5 +36,10 @@ service cloud.firestore {
       allow read: if isOwner(userId) || isSuperAdmin();
       allow create, update, delete: if isOwner(userId) || isSuperAdmin();
     }
+
+    match /system/appConfig {
+      allow read: if signedIn();
+      allow create, update, delete: if isSuperAdmin();
+    }
   }
 }

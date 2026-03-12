@@ -1,5 +1,6 @@
 
 export type BrandId = 'y8' | 'pv';
+export type CalendarEventKind = 'content' | 'launch' | 'general';
 
 export interface Task {
   id: string;
@@ -126,7 +127,6 @@ export interface UserProfile {
   customTitle?: string;   // user-defined position title (overrides role label)
   settings?: {            // persisted cross-device settings
     autoHoverExpand?: boolean;
-    calY8Url?: string;
     calPvUrl?: string;
     driveFolderId?: string;
     sheetUrl?: string;
@@ -139,6 +139,34 @@ export interface UserProfile {
       issues?: string;
     };
   };
+}
+
+export interface OrgCalendarConfig {
+  enabled: boolean;
+  label: string;
+  timezone: string;
+  y8ContentFeedUrl: string;
+  updatedAt?: number;
+  lastValidatedAt?: number;
+  lastSyncStatus?: 'ok' | 'error' | 'disabled';
+  lastError?: string | null;
+  lastEventCount?: number;
+}
+
+export interface NormalizedCalendarEvent {
+  id: string;
+  title: string;
+  description: string;
+  start: string;
+  end: string;
+  allDay: boolean;
+  timezone: string;
+  brand: string;
+  product: string;
+  contentType: string;
+  launchDate?: string;
+  rawCategoryText?: string;
+  kind: CalendarEventKind;
 }
 
 export type DailyReportType = 'morning' | 'evening';
@@ -167,4 +195,4 @@ export interface DailyReport {
   lastCopiedAt?: number;
 }
 
-export type TabType = 'log' | 'today' | 'history' | 'daily' | 'summary' | 'admin';
+export type TabType = 'log' | 'today' | 'calendar' | 'history' | 'daily' | 'summary' | 'admin';

@@ -6,6 +6,7 @@ import { defineSecret, defineString } from 'firebase-functions/params';
 import * as logger from 'firebase-functions/logger';
 
 import { GoogleSheetsGateway, SheetsSyncService } from './sheets.js';
+import { DEFAULT_Y8_CALENDAR_FEED_URL, fetchNormalizedCalendarFeed, normalizeCalendarConfigData } from './calendar.js';
 import { buildFallbackSummary, buildMonthlyStats, generateGeminiSummary, topGroupsForEntries } from './summary.js';
 import type { EntryDocument } from './types.js';
 
@@ -27,6 +28,14 @@ const getSheetsService = () =>
       GOOGLE_SERVICE_ACCOUNT_JSON.value(),
     ),
   );
+
+const getCalendarConfigRef = () => firestore.doc('system/appConfig');
+
+const loadCalendarConfig = async () => {
+  const snapshot = await getCalendarConfigRef().get();
+  const data = snapshot.data() as { calendar?: Record<string, unknown> } | undefined;
+  return normalizeCalendarConfigData(data?.calendar);
+};
 
 const sanitizeEntryForComparison = (entry: Record<string, unknown> | undefined) => {
   if (!entry) return null;
@@ -254,5 +263,108 @@ export const generateMonthlySummary = onCall(
     }
 
     return { summary, stats, source };
+  },
+);
+
+export const getCalendarFeed = onCall(
+  {
+    region: 'asia-southeast1',
+  },
+  async (request) => {
+    if (!request.auth?.uid) {
+      throw new HttpsError('unauthenticated', 'Authentication required.');
+    }
+
+    const config = await loadCalendarConfig();
+    if (!config.enabled || !config.y8ContentFeedUrl.trim()) {
+      return {
+        config: {
+          ...config,
+          lastSyncStatus: 'disabled',
+          lastError: null,
+          lastEventCount: 0,
+        },
+        events: [],
+        fetchedAt: Date.now(),
+      };
+    }
+
+    try {
+      const events = await fetchNormalizedCalendarFeed(config);
+      return {
+        config: {
+          ...config,
+          lastSyncStatus: 'ok',
+          lastError: null,
+          lastEventCount: events.length,
+        },
+        events,
+        fetchedAt: Date.now(),
+      };
+    } catch (error) {
+      logger.error('Calendar feed fetch failed', { error });
+      return {
+        config: {
+          ...config,
+          lastSyncStatus: 'error',
+          lastError: error instanceof Error ? error.message : String(error),
+        },
+        events: [],
+        fetchedAt: Date.now(),
+      };
+    }
+  },
+);
+
+export const updateCalendarConfig = onCall(
+  {
+    region: 'asia-southeast1',
+  },
+  async (request) => {
+    if (!request.auth?.token?.email || !isSuperAdminEmail(String(request.auth.token.email))) {
+      throw new HttpsError('permission-denied', 'Only super admin can update calendar settings.');
+    }
+
+    const payload = request.data as Record<string, unknown> | undefined;
+    const config = normalizeCalendarConfigData({
+      enabled: payload?.enabled,
+      label: payload?.label,
+      timezone: payload?.timezone,
+      y8ContentFeedUrl: payload?.y8ContentFeedUrl || DEFAULT_Y8_CALENDAR_FEED_URL,
+    });
+    const validateOnly = Boolean(payload?.validateOnly);
+
+    try {
+      const events = await fetchNormalizedCalendarFeed(config);
+      const calendarState = {
+        ...config,
+        updatedAt: Date.now(),
+        lastValidatedAt: Date.now(),
+        lastSyncStatus: 'ok' as const,
+        lastError: null,
+        lastEventCount: events.length,
+      };
+
+      if (!validateOnly) {
+        await getCalendarConfigRef().set({ calendar: calendarState }, { merge: true });
+      }
+
+      return { ok: true, config: calendarState, eventCount: events.length };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (!validateOnly) {
+        await getCalendarConfigRef().set({
+          calendar: {
+            ...config,
+            updatedAt: Date.now(),
+            lastValidatedAt: Date.now(),
+            lastSyncStatus: 'error',
+            lastError: message,
+            lastEventCount: 0,
+          },
+        }, { merge: true });
+      }
+      throw new HttpsError('invalid-argument', message);
+    }
   },
 );

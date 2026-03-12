@@ -60,38 +60,38 @@ export function SummaryTab({
   GroupBarComponent,
 }: SummaryTabProps) {
   return (
-    <div className="space-y-3.5 animate-in fade-in slide-in-from-bottom-2 duration-300">
-      <div className="flex items-center justify-between bg-white rounded-[18px] p-1.5 border border-slate-100 shadow-sm">
-        <button onClick={() => navSummaryMonth(-1)} className="w-9 h-9 flex items-center justify-center rounded-xl text-slate-400 active:bg-slate-50 transition-colors">
+    <div className="space-y-5 animate-in fade-in slide-in-from-bottom-2 duration-300">
+      <div className="panel-card flex items-center justify-between rounded-[20px] p-2">
+        <button onClick={() => navSummaryMonth(-1)} className="btn-secondary flex h-10 w-10 items-center justify-center rounded-xl">
           <ChevronLeft size={18} />
         </button>
         <div className="text-center">
           <p className="font-bold text-[#2C2A28] text-[14px]">{summaryData.monthName}</p>
-          <p className="text-[10px] text-slate-400">{summaryYear}</p>
+          <p className="text-[10px] text-slate-500">{summaryYear}</p>
         </div>
         <button
           onClick={() => navSummaryMonth(1)}
           disabled={isAtCurrentMonth}
-          className="w-9 h-9 flex items-center justify-center rounded-xl text-slate-400 active:bg-slate-50 disabled:opacity-25 transition-colors"
+          className="btn-secondary flex h-10 w-10 items-center justify-center rounded-xl disabled:opacity-25"
         >
           <ChevronRight size={18} />
         </button>
       </div>
 
-      <section className="bg-white p-5 rounded-[24px] border border-slate-100 shadow-sm">
+      <section className="panel-card rounded-[26px] p-5 sm:p-6">
         <div className="flex justify-between items-start mb-4">
           <div>
-            <p className="text-[9px] font-bold text-slate-400 uppercase tracking-widest mb-1">Progress</p>
+            <p className="section-kicker mb-1">Progress</p>
             <div className="flex items-end gap-2">
               <p className="text-[38px] font-light text-[#2C2A28] leading-none">{summaryData.totalCredits}</p>
-              <p className="text-[14px] text-slate-300 mb-0.5">/ {monthlyTarget} Cr.</p>
+              <p className="text-[14px] text-slate-400 mb-0.5">/ {monthlyTarget} Cr.</p>
             </div>
           </div>
           <div className="text-right">
-            <div className={`px-3 py-1.5 rounded-xl text-[11px] font-bold ${summaryData.isComplete ? 'bg-emerald-50 text-emerald-600' : 'bg-slate-50 text-slate-500'}`}>
+            <div className={`px-3 py-1.5 rounded-xl text-[11px] font-bold ${summaryData.isComplete ? 'bg-emerald-50 text-emerald-600' : 'bg-slate-50 text-slate-600'}`}>
               {summaryData.isTargetSet ? (summaryData.isComplete ? '✓ ถึงเป้าแล้ว' : `${Math.round(summaryData.percent)}%`) : 'ยังไม่ตั้งเป้า'}
             </div>
-            <p className="text-[9px] text-slate-300 mt-1.5">{summaryData.entryCount} รายการ</p>
+            <p className="mt-1.5 text-[9px] text-slate-500">{summaryData.entryCount} รายการ</p>
           </div>
         </div>
         <div className="h-2 bg-slate-100 rounded-full overflow-hidden">
@@ -112,14 +112,14 @@ export function SummaryTab({
               <TrendingUp size={16} className="text-[#F4823C]" />
             </div>
             <div>
-              <p className="text-[9px] font-bold text-white/50 uppercase tracking-widest">ต้องทำต่อวัน</p>
+              <p className="text-[9px] font-bold uppercase tracking-[0.18em] text-white/52">ต้องทำต่อวัน</p>
               <p className="text-white font-bold leading-none mt-0.5">
                 <span className="text-[24px] font-light">{summaryData.dailyNeeded}</span>
                 <span className="text-[12px] ml-1 text-white/50">Cr./วัน</span>
               </p>
             </div>
             <div className="ml-auto text-right">
-              <p className="text-[9px] font-bold text-white/50 uppercase tracking-widest">เหลืออีก</p>
+              <p className="text-[9px] font-bold uppercase tracking-[0.18em] text-white/52">เหลืออีก</p>
               <p className="text-white font-bold leading-none mt-0.5">
                 <span className="text-[24px] font-light">{summaryData.remainingCredits}</span>
                 <span className="text-[12px] ml-1 text-white/50">Cr.</span>
@@ -131,10 +131,10 @@ export function SummaryTab({
       )}
 
       {summaryData.groups.length > 0 ? (
-        <section className="bg-white p-5 rounded-[24px] border border-slate-100 shadow-sm">
+        <section className="panel-card rounded-[26px] p-5 sm:p-6">
           <div className="flex items-center gap-2 mb-4">
-            <BarChart3 size={14} className="text-slate-300" />
-            <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">สัดส่วนงาน</p>
+            <BarChart3 size={14} className="text-slate-400" />
+            <p className="section-kicker">สัดส่วนงาน</p>
           </div>
           <div className="space-y-4">
             {summaryData.groups.map((group) => (
@@ -151,9 +151,9 @@ export function SummaryTab({
           </div>
         </section>
       ) : (
-        <div className="text-center py-12 bg-white rounded-[24px] border border-dashed border-slate-200">
+        <div className="panel-card rounded-[24px] py-12 text-center">
           <BarChart3 size={26} className="text-slate-200 mx-auto mb-3" />
-          <p className="text-slate-300 text-[11px] font-bold uppercase tracking-widest">ไม่มีข้อมูลในเดือนนี้</p>
+          <p className="text-slate-400 text-[11px] font-bold uppercase tracking-[0.18em]">ไม่มีข้อมูลในเดือนนี้</p>
         </div>
       )}
 
@@ -161,35 +161,35 @@ export function SummaryTab({
         <button
           onClick={() => void handleExportToGoogleSheets()}
           disabled={sheetsExporting}
-          className="py-5 bg-white rounded-[20px] shadow-sm border border-slate-100 flex flex-col items-center justify-center gap-2 active:scale-95 transition-all disabled:opacity-60"
+          className="action-tile flex flex-col items-center justify-center gap-2 rounded-[20px] px-3 py-4 active:scale-[0.99] disabled:opacity-60"
         >
           {sheetsExporting ? <RefreshCw size={18} className="animate-spin text-emerald-400" /> : <FileText size={18} className="text-emerald-500" />}
-          <span className="font-bold text-[9px] tracking-widest text-[#2C2A28] uppercase">{sheetsExporting ? 'กำลังส่ง...' : 'Google Sheet'}</span>
+          <span className="text-[10px] font-bold text-[#2C2A28]">{sheetsExporting ? 'กำลังส่ง...' : 'Sheets'}</span>
         </button>
         <button
           onClick={() => void handleGeminiSummary()}
-          className="py-5 bg-white rounded-[20px] shadow-sm border border-slate-100 flex flex-col items-center justify-center gap-2 active:scale-95 transition-all"
+          className="action-tile flex flex-col items-center justify-center gap-2 rounded-[20px] px-3 py-4 active:scale-[0.99]"
         >
           <Sparkles size={18} className={geminiLoading ? 'animate-spin text-violet-400' : 'text-violet-500'} />
-          <span className="font-bold text-[9px] tracking-widest text-[#2C2A28] uppercase">Gemini AI</span>
+          <span className="text-[10px] font-bold text-[#2C2A28]">AI Summary</span>
         </button>
         <button
           onClick={() => setShowExportModal(true)}
-          className="py-5 bg-white rounded-[20px] shadow-sm border border-slate-100 flex flex-col items-center justify-center gap-2 active:scale-95 transition-all"
+          className="action-tile flex flex-col items-center justify-center gap-2 rounded-[20px] px-3 py-4 active:scale-[0.99]"
         >
           <Download size={18} className="text-sky-500" />
-          <span className="font-bold text-[9px] tracking-widest text-[#2C2A28] uppercase">Export</span>
+          <span className="text-[10px] font-bold text-[#2C2A28]">Export</span>
         </button>
       </div>
 
       {showGemini && (
-        <section className="bg-white p-5 rounded-[24px] border border-violet-100 shadow-sm animate-in fade-in duration-300">
+        <section className="panel-card rounded-[24px] p-5 animate-in fade-in duration-300">
           <div className="flex items-center justify-between mb-3">
             <div className="flex items-center gap-2">
               <Sparkles size={14} className="text-violet-500" />
-              <p className="text-[10px] font-bold text-violet-600 uppercase tracking-widest">Gemini AI Summary</p>
+              <p className="text-[10px] font-bold uppercase tracking-[0.18em] text-violet-600">AI Summary</p>
             </div>
-            <button onClick={() => setShowGemini(false)} className="text-slate-300 hover:text-slate-500">
+            <button onClick={() => setShowGemini(false)} className="text-slate-400 hover:text-slate-600">
               <X size={16} />
             </button>
           </div>

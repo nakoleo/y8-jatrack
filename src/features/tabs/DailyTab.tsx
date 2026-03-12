@@ -86,13 +86,12 @@ export function DailyTab({
   DailyListFieldComponent,
 }: DailyTabProps) {
   return (
-    <div className="space-y-4 animate-in fade-in slide-in-from-bottom-2 duration-300">
-      <div className="bg-white p-4 rounded-[24px] border border-slate-100 shadow-sm space-y-4">
+    <div className="space-y-5 animate-in fade-in slide-in-from-bottom-2 duration-300">
+      <div className="panel-card rounded-[26px] p-5 space-y-4">
         <div className="flex items-center gap-2">
           <FileText size={15} className="text-[#F4823C]" />
           <div>
-            <p className="text-[11px] font-bold text-[#2C2A28] uppercase tracking-widest">Daily Report</p>
-            <p className="text-[9px] text-slate-400">สร้างข้อความรายงานสำหรับส่ง LINE และบันทึก history อัตโนมัติ</p>
+            <p className="text-[12px] font-bold uppercase tracking-[0.18em] text-[#2C2A28]">Daily Report</p>
           </div>
         </div>
 
@@ -105,9 +104,7 @@ export function DailyTab({
             <button
               key={tab.key}
               onClick={() => setDailyTab(tab.key as 'morning' | 'evening' | 'history')}
-              className={`py-3 rounded-2xl border text-[11px] font-bold flex items-center justify-center gap-1.5 transition-colors ${
-                dailyTab === tab.key ? 'bg-[#2C2A28] text-[#F4823C] border-[#2C2A28]' : 'bg-slate-50 text-slate-400 border-slate-100'
-              }`}
+              className={`segmented-button py-3 rounded-2xl text-[11px] font-bold flex items-center justify-center gap-1.5 ${dailyTab === tab.key ? 'active' : ''}`}
             >
               {tab.icon}
               {tab.label}
@@ -116,7 +113,7 @@ export function DailyTab({
         </div>
 
         <div className="space-y-1.5">
-          <label className="text-[9px] font-bold text-slate-400 uppercase tracking-widest">วันที่รายงาน</label>
+          <label className="section-kicker">วันที่รายงาน</label>
           <input
             type="date"
             value={dailyDate}
@@ -128,14 +125,14 @@ export function DailyTab({
 
       {dailyTab === 'morning' && (
         <div className="space-y-4">
-          <section className="bg-white p-4 rounded-[24px] border border-slate-100 shadow-sm space-y-4">
+          <section className="panel-card rounded-[24px] p-5 space-y-5">
             <div className="grid grid-cols-2 gap-3">
-              <div className="px-4 py-3 bg-slate-50 rounded-2xl border border-slate-100">
-                <p className="text-[9px] font-bold text-slate-400 uppercase tracking-widest">ผู้รายงาน</p>
+              <div className="panel-card-soft rounded-2xl px-4 py-3">
+                <p className="section-kicker">ผู้รายงาน</p>
                 <p className="text-[13px] font-bold text-[#2C2A28] mt-1">{displayName}</p>
               </div>
               <div className="space-y-1.5">
-                <label className="text-[9px] font-bold text-slate-400 uppercase tracking-widest">Check-in</label>
+                <label className="section-kicker">Check-in</label>
                 <input
                   type="time"
                   value={morningCheckInTime}
@@ -157,19 +154,18 @@ export function DailyTab({
             <button
               onClick={() => void saveAndCopyDailyReport('morning')}
               disabled={dailySaving}
-              className="w-full py-4 text-white rounded-2xl font-bold text-[13px] tracking-wide active:scale-95 transition-all glow-orange disabled:opacity-60"
-              style={{ background: 'linear-gradient(135deg, #F4823C, #F5A855)' }}
+              className="btn-primary w-full rounded-2xl py-4 text-[13px] font-bold tracking-[0.08em] active:scale-[0.99] disabled:opacity-60"
             >
-              {dailySaving ? 'กำลังบันทึก...' : dailyCopySuccess ? 'Copied for LINE ✓' : 'Save & Copy for LINE'}
+              {dailySaving ? 'กำลังบันทึก...' : dailyCopySuccess ? 'คัดลอกแล้ว' : 'บันทึกและคัดลอก'}
             </button>
           </section>
 
-          <section className="bg-[#2C2A28] p-4 rounded-[24px] border border-[#2C2A28] shadow-sm space-y-3">
+          <section className="rounded-[24px] border border-[#2C2A28] bg-[#2C2A28] p-5 shadow-sm space-y-3">
             <div className="flex items-center justify-between">
-              <p className="text-[10px] font-bold text-white/60 uppercase tracking-widest">Preview</p>
+              <p className="text-[10px] font-bold uppercase tracking-[0.18em] text-white/72">Preview</p>
               <button
                 onClick={() => void copyDailyText(morningPreviewText).then(() => showToast('คัดลอก Preview แล้ว ✓')).catch(() => showToast('❌ คัดลอกไม่สำเร็จ'))}
-                className="px-3 py-1.5 rounded-xl bg-white/10 text-white text-[10px] font-bold flex items-center gap-1.5"
+                className="btn-secondary-dark flex items-center gap-1.5 rounded-xl px-3 py-1.5 text-[10px] font-bold"
               >
                 {dailyCopySuccess ? <ClipboardCheck size={13} className="text-emerald-300" /> : <Copy size={13} />}
                 Copy
@@ -182,11 +178,10 @@ export function DailyTab({
 
       {dailyTab === 'evening' && (
         <div className="space-y-4">
-          <section className="bg-white p-4 rounded-[24px] border border-slate-100 shadow-sm space-y-4">
-            <div className="px-4 py-3 bg-slate-50 rounded-2xl border border-slate-100">
-              <p className="text-[9px] font-bold text-slate-400 uppercase tracking-widest">Auto Draft จาก Work Log</p>
+          <section className="panel-card rounded-[24px] p-5 space-y-5">
+            <div className="panel-card-soft rounded-2xl px-4 py-3">
+              <p className="section-kicker">Auto Draft</p>
               <p className="text-[12px] font-bold text-[#2C2A28] mt-1">{dailyEntriesForDate.length} รายการในวันที่เลือก</p>
-              <p className="text-[9px] text-slate-400 mt-1">Routine และ Results จะดึงจากงานที่บันทึกไว้ของวันนั้นให้อัตโนมัติ</p>
             </div>
 
             <DailyListFieldComponent
@@ -218,7 +213,7 @@ export function DailyTab({
 
             <div className="space-y-3">
               <div className="space-y-1.5">
-                <label className="text-[9px] font-bold text-slate-400 uppercase tracking-widest">Issues</label>
+                <label className="section-kicker">Issues</label>
                 <input
                   type="text"
                   value={dailyIssues}
@@ -232,7 +227,7 @@ export function DailyTab({
                   type="button"
                   onClick={() => setDailyIssueStatus('resolved')}
                   className={`py-3 rounded-2xl border text-[11px] font-bold transition-colors ${
-                    dailyIssueStatus === 'resolved' ? 'bg-emerald-500 text-white border-emerald-500' : 'bg-slate-50 text-slate-500 border-slate-100'
+                    dailyIssueStatus === 'resolved' ? 'bg-emerald-500 text-white border-emerald-500' : 'btn-secondary'
                   }`}
                 >
                   แก้ไขได้แล้ว
@@ -241,7 +236,7 @@ export function DailyTab({
                   type="button"
                   onClick={() => setDailyIssueStatus('unresolved')}
                   className={`py-3 rounded-2xl border text-[11px] font-bold transition-colors ${
-                    dailyIssueStatus === 'unresolved' ? 'bg-rose-500 text-white border-rose-500' : 'bg-slate-50 text-slate-500 border-slate-100'
+                    dailyIssueStatus === 'unresolved' ? 'bg-rose-500 text-white border-rose-500' : 'btn-secondary'
                   }`}
                 >
                   ยังแก้ไขไม่ได้
@@ -266,19 +261,18 @@ export function DailyTab({
             <button
               onClick={() => void saveAndCopyDailyReport('evening')}
               disabled={dailySaving}
-              className="w-full py-4 text-white rounded-2xl font-bold text-[13px] tracking-wide active:scale-95 transition-all glow-orange disabled:opacity-60"
-              style={{ background: 'linear-gradient(135deg, #F4823C, #F5A855)' }}
+              className="btn-primary w-full rounded-2xl py-4 text-[13px] font-bold tracking-[0.08em] active:scale-[0.99] disabled:opacity-60"
             >
-              {dailySaving ? 'กำลังบันทึก...' : dailyCopySuccess ? 'Copied for LINE ✓' : 'Save & Copy for LINE'}
+              {dailySaving ? 'กำลังบันทึก...' : dailyCopySuccess ? 'คัดลอกแล้ว' : 'บันทึกและคัดลอก'}
             </button>
           </section>
 
-          <section className="bg-[#2C2A28] p-4 rounded-[24px] border border-[#2C2A28] shadow-sm space-y-3">
+          <section className="rounded-[24px] border border-[#2C2A28] bg-[#2C2A28] p-5 shadow-sm space-y-3">
             <div className="flex items-center justify-between">
-              <p className="text-[10px] font-bold text-white/60 uppercase tracking-widest">Preview</p>
+              <p className="text-[10px] font-bold uppercase tracking-[0.18em] text-white/72">Preview</p>
               <button
                 onClick={() => void copyDailyText(eveningPreviewText).then(() => showToast('คัดลอก Preview แล้ว ✓')).catch(() => showToast('❌ คัดลอกไม่สำเร็จ'))}
-                className="px-3 py-1.5 rounded-xl bg-white/10 text-white text-[10px] font-bold flex items-center gap-1.5"
+                className="btn-secondary-dark flex items-center gap-1.5 rounded-xl px-3 py-1.5 text-[10px] font-bold"
               >
                 {dailyCopySuccess ? <ClipboardCheck size={13} className="text-emerald-300" /> : <Copy size={13} />}
                 Copy
@@ -292,18 +286,18 @@ export function DailyTab({
       {dailyTab === 'history' && (
         <div className="space-y-3">
           {dailyReportsLoading ? (
-            <div className="text-center py-16 bg-white rounded-[24px] border border-dashed border-slate-200">
+            <div className="panel-card rounded-[24px] py-16 text-center">
               <RefreshCw size={24} className="text-slate-200 mx-auto mb-3 animate-spin" />
-              <p className="text-slate-300 text-[11px] font-bold uppercase tracking-widest">กำลังโหลด Daily Reports</p>
+              <p className="text-slate-400 text-[11px] font-bold uppercase tracking-[0.18em]">กำลังโหลด Daily Reports</p>
             </div>
           ) : dailyReports.length === 0 ? (
-            <div className="text-center py-16 bg-white rounded-[24px] border border-dashed border-slate-200">
+            <div className="panel-card rounded-[24px] py-16 text-center">
               <History size={26} className="text-slate-200 mx-auto mb-3" />
-              <p className="text-slate-300 text-[11px] font-bold uppercase tracking-widest">ยังไม่มี Daily Report</p>
+              <p className="text-slate-400 text-[11px] font-bold uppercase tracking-[0.18em]">ยังไม่มี Daily Report</p>
             </div>
           ) : (
             dailyReports.map((report) => (
-              <div key={report.id} className="bg-white p-4 rounded-[20px] border border-slate-100 shadow-sm space-y-3">
+              <div key={report.id} className="panel-card rounded-[22px] p-4 space-y-3">
                 <div className="flex items-start justify-between gap-3">
                   <div className="min-w-0">
                     <div className="flex items-center gap-2">
@@ -318,7 +312,7 @@ export function DailyTab({
                   </div>
                   <button
                     onClick={() => void handleCopyDailyHistory(report)}
-                    className="shrink-0 px-3 py-2 rounded-xl bg-slate-50 border border-slate-100 text-[10px] font-bold text-slate-500 flex items-center gap-1.5"
+                    className="btn-secondary shrink-0 flex items-center gap-1.5 rounded-xl px-3 py-2 text-[10px] font-bold"
                   >
                     <Copy size={12} /> Copy Again
                   </button>

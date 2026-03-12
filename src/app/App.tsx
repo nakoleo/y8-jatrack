@@ -4,22 +4,28 @@ import {
   PlusCircle, History, BarChart3, Calendar as CalendarIcon,
   Trash2, CheckCircle2, Plus, Minus, Clock, Edit3, X, Settings,
   ChevronDown, FileText, Sparkles, Download, RefreshCw,
-  LogOut, ChevronLeft, ChevronRight, TrendingUp, Wifi, WifiOff,
-  Save, Sliders, UserCircle, Upload, ExternalLink, AlertTriangle,
-  Copy, ClipboardCheck, Sun, Moon,
+  ChevronLeft, ChevronRight, TrendingUp,
+  Save, UserCircle, Upload, Copy, ClipboardCheck, Sun, Moon,
 } from 'lucide-react';
 import {
   collection, collectionGroup, doc, setDoc, deleteDoc,
-  onSnapshot, query, orderBy, getDocs,
+  onSnapshot, query, orderBy,
 } from 'firebase/firestore';
 import {
   signInWithPopup, signOut, onAuthStateChanged, type User,
   reauthenticateWithPopup, GoogleAuthProvider,
 } from 'firebase/auth';
 import { db, auth, googleProvider, createDriveProvider, firebaseApp } from '../lib/firebase/client';
-import { adminDeleteUser as adminDeleteUserCallable, generateMonthlySummary as generateMonthlySummaryCallable } from '../lib/functionsClient';
+import {
+  adminDeleteUser as adminDeleteUserCallable,
+  generateMonthlySummary as generateMonthlySummaryCallable,
+  getCalendarFeed as getCalendarFeedCallable,
+  updateCalendarConfig as updateCalendarConfigCallable,
+} from '../lib/functionsClient';
 import { LoadingScreen as AuthLoadingScreen, NicknameSetupScreen as AuthNicknameSetupScreen, SignInScreen as AuthSignInScreen } from '../features/auth/screens';
+import { SettingsPanel } from '../features/settings/SettingsPanel';
 import { AdminTab } from '../features/tabs/AdminTab';
+import { CalendarTab } from '../features/tabs/CalendarTab';
 import { DailyTab } from '../features/tabs/DailyTab';
 import { HistoryTab } from '../features/tabs/HistoryTab';
 import { LogTab } from '../features/tabs/LogTab';
@@ -27,7 +33,20 @@ import { SummaryTab } from '../features/tabs/SummaryTab';
 import { TodayTab } from '../features/tabs/TodayTab';
 import { resolveAppViewState } from './viewState';
 import { WORK_GROUPS } from '@/config/constants';
-import type { WorkEntry, WorkGroup, WorkGroups, TabType, UserProfile, RoleId, DriveAttachment, LocalFileRef, DailyReport, DailyReportType } from '@/domain/types';
+import type {
+  DailyReport,
+  DailyReportType,
+  DriveAttachment,
+  LocalFileRef,
+  NormalizedCalendarEvent,
+  OrgCalendarConfig,
+  RoleId,
+  TabType,
+  UserProfile,
+  WorkEntry,
+  WorkGroup,
+  WorkGroups,
+} from '@/domain/types';
 import { ROLE_DEFAULTS, ROLE_EMOJI } from '@/config/roleDefaults';
 
 // ─── HELPERS ─────────────────────────────────────────────────────────────────
@@ -36,6 +55,15 @@ const SUPER_ADMIN_EMAIL = 'info.nakoleo@gmail.com';
 const KPI_POLICY_VERSION = 3;
 const EXPECTED_FIREBASE_PROJECT = 'jartrack-y8pv';
 const EXPECTED_FIREBASE_AUTH_DOMAIN = 'jartrack-y8pv.firebaseapp.com';
+const DEFAULT_ORG_CALENDAR_CONFIG: OrgCalendarConfig = {
+  enabled: true,
+  label: 'Y8 Content',
+  timezone: 'Asia/Bangkok',
+  y8ContentFeedUrl: 'https://calendar.google.com/calendar/ical/743173a9c6b8651869b290dfecffd664359d853f459ef6a410824216e2968ce8%40group.calendar.google.com/private-55042342e3a3e421eafa8e46338e5af3/basic.ics',
+  lastSyncStatus: 'ok',
+  lastError: null,
+  lastEventCount: 0,
+};
 
 const ZERO_STARTER_GROUPS: WorkGroups = {
   A: {
@@ -72,6 +100,14 @@ const dateToLocalStr = (date: Date) => {
   const d = String(date.getDate()).padStart(2, '0');
   return `${y}-${m}-${d}`;
 };
+
+const dateKeyInTimezone = (value: string | Date, timezone: string) =>
+  new Intl.DateTimeFormat('en-CA', {
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    timeZone: timezone,
+  }).format(typeof value === 'string' ? new Date(value) : value);
 
 const safePercent = (value: number, target: number) =>
   target > 0 ? Math.min((value / target) * 100, 100) : 0;
@@ -113,41 +149,6 @@ const formatThaiDate = (dateStr: string, full = false) => {
 
 const getMonthNameThai = (monthIndex: number) =>
   new Intl.DateTimeFormat('th-TH', { month: 'long' }).format(new Date(2026, monthIndex));
-
-// ─── CALENDAR TYPES + HELPERS ────────────────────────────────────────────────
-interface CalEvent {
-  uid: string;
-  title: string;
-  start: Date;
-  end: Date;
-  brand: 'y8' | 'pv';
-}
-
-const parseIcalDate = (raw: string): Date => {
-  if (raw.includes('T')) {
-    const s = raw.replace(/[^0-9]/g, '');
-    return new Date(`${s.slice(0,4)}-${s.slice(4,6)}-${s.slice(6,8)}T${s.slice(8,10)}:${s.slice(10,12)}:${s.slice(12,14)}Z`);
-  }
-  return new Date(`${raw.slice(0,4)}-${raw.slice(4,6)}-${raw.slice(6,8)}T00:00:00`);
-};
-
-const parseIcal = (text: string, brand: 'y8' | 'pv'): CalEvent[] =>
-  text.split('BEGIN:VEVENT').slice(1).reduce<CalEvent[]>((acc, block) => {
-    const get = (k: string) => { const m = block.match(new RegExp(`${k}[^:]*:(.+)`)); return m ? m[1].trim() : ''; };
-    try {
-      const startStr = get('DTSTART');
-      const endStr   = get('DTEND') || startStr;
-      if (!startStr) return acc;
-      acc.push({
-        uid:   get('UID') || Math.random().toString(36),
-        title: get('SUMMARY').replace(/\\n/g, ' ').replace(/\\,/g, ',') || '(ไม่มีชื่อ)',
-        start: parseIcalDate(startStr),
-        end:   parseIcalDate(endStr),
-        brand,
-      });
-    } catch { /* skip malformed */ }
-    return acc;
-  }, []);
 
 const extractGoogleApiReason = (raw: string) => {
   if (!raw) return '';
