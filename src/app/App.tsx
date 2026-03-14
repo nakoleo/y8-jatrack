@@ -1291,7 +1291,7 @@ export default function App() {
     );
 
     const unsubscribeEntries = onSnapshot(
-      query(collectionGroup(db, 'entries'), orderBy('createdAt', 'desc')),
+      collectionGroup(db, 'entries'),
       (snapshot) => {
         setAdminEntries(snapshot.docs.map(d => ({ ...d.data() } as WorkEntry)));
       },
