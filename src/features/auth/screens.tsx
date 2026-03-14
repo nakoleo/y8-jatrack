@@ -45,42 +45,12 @@ export const SignInScreen = ({
   <div className="min-h-[100dvh] bg-[#FDFAF7] px-5 py-6 sm:px-6 lg:px-10 lg:py-10">
     <ToastComponent {...toast} />
     <div className="absolute inset-0 overflow-hidden pointer-events-none">
-      <div className="absolute left-[12%] top-[14%] h-72 w-72 rounded-full bg-orange-200/25 blur-3xl lg:h-96 lg:w-96" />
-      <div className="absolute right-[8%] bottom-[8%] h-64 w-64 rounded-full bg-[#f0d8c4]/40 blur-3xl lg:h-80 lg:w-80" />
+      <div className="absolute left-[14%] top-[12%] h-72 w-72 rounded-full bg-orange-200/20 blur-3xl lg:h-96 lg:w-96" />
+      <div className="absolute right-[10%] bottom-[10%] h-64 w-64 rounded-full bg-[#f3dcc8]/35 blur-3xl lg:h-80 lg:w-80" />
     </div>
-    <div className="relative z-10 mx-auto flex min-h-[calc(100dvh-3rem)] max-w-6xl overflow-hidden rounded-[32px] border border-white/65 bg-white/40 shadow-[0_24px_80px_rgba(44,42,40,0.08)] backdrop-blur-xl lg:min-h-[calc(100dvh-5rem)]">
-      <aside className="hidden lg:flex lg:w-[48%] flex-col justify-between bg-[linear-gradient(160deg,#2c2a28_0%,#403b37_52%,#6a5a4f_100%)] px-12 py-14 text-white">
-        <div>
-          <div className="inline-flex items-center gap-3 rounded-full border border-white/12 bg-white/8 px-4 py-2">
-            <AppLogo size={46} />
-            <div>
-              <p className="text-[11px] font-semibold uppercase tracking-[0.24em] text-white/55">Jatrack</p>
-              <p className="text-[13px] font-medium text-white/82">KPI Tracker</p>
-            </div>
-          </div>
-          <div className="mt-12 max-w-sm">
-            <p className="text-[12px] font-semibold uppercase tracking-[0.28em] text-[#f5a855]">Workspace Access</p>
-            <h1 className="mt-4 text-[42px] font-light leading-[1.08] tracking-[0.04em]">Track output with one clean workspace.</h1>
-            <p className="mt-5 text-[15px] leading-7 text-white/72">
-              Google sign-in keeps Drive, Sheets, and team permissions aligned from the first step.
-            </p>
-          </div>
-        </div>
-
-        <div className="grid grid-cols-2 gap-3 text-left">
-          <div className="rounded-[24px] border border-white/10 bg-white/8 p-4">
-            <p className="text-[10px] uppercase tracking-[0.22em] text-white/45">Connected</p>
-            <p className="mt-2 text-[18px] font-medium text-white/92">Drive + Sheets</p>
-          </div>
-          <div className="rounded-[24px] border border-white/10 bg-white/8 p-4">
-            <p className="text-[10px] uppercase tracking-[0.22em] text-white/45">Access</p>
-            <p className="mt-2 text-[18px] font-medium text-white/92">Role-based</p>
-          </div>
-        </div>
-      </aside>
-
-      <main className="flex flex-1 items-center justify-center px-5 py-8 sm:px-8 lg:px-12">
-        <div className="panel-card w-full max-w-[430px] rounded-[32px] px-6 py-8 sm:px-8 sm:py-10">
+    <div className="relative z-10 mx-auto flex min-h-[calc(100dvh-3rem)] max-w-5xl items-center justify-center rounded-[32px] border border-white/65 bg-white/40 px-5 py-8 shadow-[0_24px_80px_rgba(44,42,40,0.08)] backdrop-blur-xl lg:min-h-[calc(100dvh-5rem)] lg:px-10 lg:py-12">
+      <main className="flex w-full items-center justify-center">
+        <div className="panel-card w-full max-w-[420px] rounded-[30px] px-6 py-8 sm:px-8 sm:py-9">
           <div className="flex flex-col items-center animate-in zoom-in duration-500">
             <div className="relative mb-6 flex flex-col items-center">
               <div
@@ -93,18 +63,14 @@ export const SignInScreen = ({
                 style={{ background: 'rgba(244,130,60,0.55)' }}
               />
             </div>
-            <h1 className="text-[22px] font-light text-[#2C2A28] tracking-[0.14em]">Jatrack</h1>
-            <p className="mt-1 text-[11px] font-bold uppercase tracking-[0.32em] text-[#F4823C]">KPI Tracker</p>
-          </div>
-
-          <div className="panel-card-soft mt-8 rounded-[24px] px-4 py-4">
-            <p className="text-[10px] font-bold uppercase tracking-[0.24em] text-[#d96f2d]">Google Access</p>
-            <p className="mt-2 text-[13px] leading-6 text-slate-600">
-              ใช้บัญชี Google ของทีมเพื่อเข้าใช้งานและเชื่อมข้อมูลอัตโนมัติ
+            <h1 className="text-[24px] font-bold text-[#F4823C] tracking-[0.08em]">JaTrack</h1>
+            <p className="mt-1 text-[11px] font-medium tracking-[0.22em] text-slate-500">KPI Tracker by Y8PV</p>
+            <p className="mt-4 max-w-[280px] text-center text-[13px] leading-6 text-slate-500">
+              เข้าด้วยบัญชี Google ของทีมเพื่อเริ่มใช้งานและซิงก์ข้อมูลอัตโนมัติ
             </p>
           </div>
 
-          <div className="mt-6 space-y-3 animate-in slide-in-from-bottom duration-500">
+          <div className="mt-7 space-y-3 animate-in slide-in-from-bottom duration-500">
             <button
               onClick={onSignIn}
               disabled={loading}
@@ -122,12 +88,18 @@ export const SignInScreen = ({
                 </>
               )}
             </button>
-            <p className="text-center text-[11px] text-slate-500">เชื่อม Drive และ Sheets ตามบัญชีนี้</p>
+            <p className="text-center text-[11px] text-slate-500">ระบบจะกำหนดสิทธิ์ตามบัญชีที่เข้าสู่ระบบ</p>
           </div>
 
-          <p className="mt-8 text-center text-[10px] tracking-[0.16em] text-slate-500 lg:mt-10">
-            © 2026 Young Age Corporation Co., Ltd. &amp; Pharvia 2025 Co., Ltd.
-          </p>
+          <div className="mt-7 flex items-center justify-center gap-2 text-[10px] uppercase tracking-[0.18em] text-slate-400">
+            <span className="rounded-full border border-slate-200 bg-white/80 px-3 py-1.5">Drive + Sheets</span>
+            <span className="rounded-full border border-slate-200 bg-white/80 px-3 py-1.5">Role-based</span>
+          </div>
+
+          <div className="mt-7 text-center text-[10px] tracking-[0.16em] text-slate-500 leading-5">
+            <p>© 2026 Young Age Corporation Co., Ltd.</p>
+            <p>&amp; Pharvia 2025 Co., Ltd.</p>
+          </div>
         </div>
       </main>
     </div>

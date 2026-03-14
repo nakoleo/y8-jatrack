@@ -1079,7 +1079,6 @@ export default function App() {
   const isSuperAdmin = isSuperAdminEmail(currentUser?.email);
 
   // ── New v3 states
-  const [syncQueueCount, setSyncQueueCount]       = useState(0);
   const [customTitleDraft, setCustomTitleDraft]   = useState('');
   const [pendingLocalFiles, setPendingLocalFiles] = useState<LocalFileRef[]>([]);
 
@@ -1127,16 +1126,6 @@ export default function App() {
       try { setAutoHoverExpand(JSON.parse(savedHover) as boolean); } catch { /* ignore */ }
     }
   }, [currentUser]);
-
-  // ── Init syncQueueCount when user changes
-  useEffect(() => {
-    if (!currentUser) { setSyncQueueCount(0); return; }
-    setSyncQueueCount(0);
-  }, [currentUser]);
-
-  useEffect(() => {
-    setSyncQueueCount(entries.filter((entry) => entry.sheetSync?.status && entry.sheetSync.status !== 'synced').length);
-  }, [entries]);
 
   // ── Sync customTitleDraft when Settings opens
   useEffect(() => {
@@ -3314,11 +3303,6 @@ export default function App() {
           <div className="flex gap-1.5 items-center">
             <div className={`relative w-9 h-9 rounded-xl flex items-center justify-center border transition-colors ${isOnline ? 'bg-emerald-50/80 border-emerald-200/50 text-emerald-500' : 'bg-rose-50/80 border-rose-200/50 text-rose-400'}`}>
               {isOnline ? <Wifi size={14} /> : <WifiOff size={14} />}
-              {syncQueueCount > 0 && (
-                <span className="absolute -top-1 -right-1 w-4 h-4 bg-amber-400 rounded-full flex items-center justify-center pointer-events-none">
-                  <span className="text-[8px] font-black text-white leading-none">{syncQueueCount > 9 ? '9+' : syncQueueCount}</span>
-                </span>
-              )}
             </div>
             <button
               onClick={() => setShowSettings(true)}
