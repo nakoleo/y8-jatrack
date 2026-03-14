@@ -18,6 +18,6 @@ export const resolveAppViewState = ({
   if (authLoading || profileLoading) return 'loading';
   if (!currentUser) return 'signin';
   if (!userProfile) return 'loading';
-  if (!userProfile.nickname?.trim()) return 'nickname';
+  if (!userProfile.nickname?.trim() || !userProfile.customTitle?.trim()) return 'nickname';
   return 'app';
 };

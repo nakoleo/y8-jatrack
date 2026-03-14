@@ -39,6 +39,24 @@ describe('resolveAppViewState', () => {
     })).toBe('nickname');
   });
 
+  it('returns nickname when authenticated profile has no custom title', () => {
+    expect(resolveAppViewState({
+      authLoading: false,
+      profileLoading: false,
+      currentUser: { uid: 'u1' } as never,
+      userProfile: {
+        uid: 'u1',
+        displayName: 'User',
+        nickname: 'Gift',
+        email: 'user@example.com',
+        role: 'custom',
+        isAdmin: false,
+        createdAt: 1,
+        updatedAt: 1,
+      },
+    })).toBe('nickname');
+  });
+
   it('returns app for ready authenticated user', () => {
     expect(resolveAppViewState({
       authLoading: false,
@@ -51,6 +69,7 @@ describe('resolveAppViewState', () => {
         email: 'user@example.com',
         role: 'custom',
         isAdmin: false,
+        customTitle: 'Designer',
         createdAt: 1,
         updatedAt: 1,
       },

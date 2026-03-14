@@ -8,6 +8,9 @@ const rows = [
     uid: 'orb',
     nickname: 'Orb',
     role: 'art_director',
+    displayTitle: 'Art Director',
+    email: 'info.nakoleo@gmail.com',
+    photoURL: 'https://example.com/orb.jpg',
     target: 300,
     credits: 120,
     count: 12,
@@ -18,6 +21,8 @@ const rows = [
     uid: 'gift',
     nickname: 'Gift',
     role: 'custom',
+    displayTitle: 'Graphic Designer',
+    email: 'gift@example.com',
     target: 150,
     credits: 90,
     count: 9,
@@ -49,6 +54,8 @@ describe('AdminTab', () => {
 
     expect(screen.getAllByText(/Target/i)[0]).toBeInTheDocument();
     expect(screen.getByText('150 Cr.')).toBeInTheDocument();
+    expect(screen.getByText('gift@example.com')).toBeInTheDocument();
+    expect(screen.getByAltText('Orb')).toBeInTheDocument();
     expect(screen.queryByTitle('ลบผู้ใช้')).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('button', { name: 'จัดการ Gift' }));

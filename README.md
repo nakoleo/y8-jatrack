@@ -12,7 +12,9 @@ KPI tracking app for Y8/PV teams (mobile-first, Firebase + Google integrations).
 - Super admin can view all users in `Admin` tab
 - Admin view supports monthly KPI comparison per person with reorder controls
 - Super admin can open and edit another user's KPI/groups/tasks from Admin
+- Super admin can delete mistaken/test users from the managed-user view with 2-step confirmation, including Firebase Auth removal
 - KPI config editor per user
+- First-time users must complete nickname + display title onboarding before entering the main app
 - Firestore-first entry lifecycle with background callable Google Sheets sync (`create / update / delete` by `entry_id`)
 - Work logs with optional attachment links:
   - Canva URL
@@ -103,6 +105,7 @@ Production URLs:
 
 - Use Settings in app to save:
   - Nickname (required for sheet naming/report identity)
+  - Display title / position
   - Google Sheet URL (personal/export reference only)
   - Google Drive folder ID (optional)
   - Central calendar is admin-managed; normal users do not edit the feed URL
@@ -110,6 +113,7 @@ Production URLs:
 - AI Summary now runs on backend; user devices do not store Gemini API keys
 - Production no longer relies on Firestore trigger-based sheet sync
 - Legacy sandbox remains under `archive/jatrack-daily/`
+- Admin cards show each user's Google profile photo when available
 - If Google Drive upload fails:
   - Reconnect Google Drive from Settings (consent popup)
   - Verify Google Drive API is enabled in Google Cloud project

@@ -17,6 +17,7 @@ import {
 } from 'firebase/auth';
 import { db, auth, googleProvider, createDriveProvider, firebaseApp } from '../lib/firebase/client';
 import {
+  adminDeleteUser as adminDeleteUserCallable,
   syncEntryToSheets as syncEntryToSheetsCallable,
   generateMonthlySummary as generateMonthlySummaryCallable,
   getCalendarFeed as getCalendarFeedCallable,
@@ -417,7 +418,7 @@ const GROUP_COLORS = [
 
 // ─── KPI EDITOR (Phase 5 — per-user, group CRUD, target) ─────────────────────
 function KpiEditor({
-  config, monthlyTarget, onSave, onClose, title = 'จัดการ KPI ของฉัน', subtitle = 'กลุ่มงาน · รายการ · Credits · เป้าหมาย',
+  config, monthlyTarget, onSave, onClose, title = 'จัดการ KPI ของฉัน', subtitle = 'กลุ่มงาน · รายการ · Credits · เป้าหมาย', deleteAction,
 }: {
   config: WorkGroups;
   monthlyTarget: number;
@@ -425,6 +426,11 @@ function KpiEditor({
   onClose: () => void;
   title?: string;
   subtitle?: string;
+  deleteAction?: {
+    label: string;
+    helper: string;
+    onDelete: () => Promise<void>;
+  };
 }) {
   const [draft, setDraft]             = useState<WorkGroups>(() => JSON.parse(JSON.stringify(config)));
   const [targetDraft, setTargetDraft] = useState<number>(monthlyTarget);
@@ -770,6 +776,23 @@ function KpiEditor({
         <p className="text-center text-[10px] text-slate-300 pb-2">
           การเปลี่ยนแปลงนี้จะมีผลเฉพาะ KPI ของคุณเท่านั้น
         </p>
+
+        {deleteAction && (
+          <div className="bg-rose-50 rounded-[20px] border border-rose-200 px-5 py-4 space-y-3">
+            <div>
+              <p className="text-[10px] font-bold text-rose-500 uppercase tracking-widest">Danger Zone</p>
+              <p className="mt-2 text-[13px] font-semibold text-[#2C2A28]">{deleteAction.label}</p>
+              <p className="mt-1 text-[12px] text-slate-500 leading-6">{deleteAction.helper}</p>
+            </div>
+            <button
+              type="button"
+              onClick={() => void deleteAction.onDelete()}
+              className="w-full rounded-2xl border border-rose-200 bg-white px-4 py-3 text-[12px] font-bold text-rose-600"
+            >
+              ลบผู้ใช้นี้ออกจากระบบ
+            </button>
+          </div>
+        )}
       </div>
     </div>
   );
@@ -1824,22 +1847,29 @@ export default function App() {
     }
   };
 
-  const handleSaveNickname = async (nextNickname: string): Promise<boolean> => {
+  const handleSaveProfileBasics = async (nextNickname: string, nextCustomTitle?: string): Promise<boolean> => {
     if (!currentUser) return false;
     const cleaned = nextNickname.trim();
+    const cleanedTitle = (nextCustomTitle ?? customTitleDraft).trim();
     if (!cleaned) {
       showToast('กรุณาใส่ชื่อเล่น');
       return false;
     }
+    if (!cleanedTitle) {
+      showToast('กรุณาระบุตำแหน่งงาน');
+      return false;
+    }
     await setDoc(doc(db, 'users', currentUser.uid), {
       nickname: cleaned,
+      customTitle: cleanedTitle,
       role: resolveRoleByEmail(currentUser.email),
       isAdmin: isSuperAdminEmail(currentUser.email),
       updatedAt: Date.now(),
     }, { merge: true });
     setNicknameDraft(cleaned);
-    setUserProfile((prev) => (prev ? { ...prev, nickname: cleaned } : prev));
-    showToast('บันทึกชื่อเล่นแล้ว');
+    setCustomTitleDraft(cleanedTitle);
+    setUserProfile((prev) => (prev ? { ...prev, nickname: cleaned, customTitle: cleanedTitle } : prev));
+    showToast('บันทึกโปรไฟล์แล้ว');
     return true;
   };
 
@@ -1866,7 +1896,7 @@ export default function App() {
 
   const handleSaveSettings = async () => {
     if (!currentUser) return;
-    const ok = await handleSaveNickname(nicknameDraft);
+    const ok = await handleSaveProfileBasics(nicknameDraft, customTitleDraft);
     if (!ok) return;
 
     try {
@@ -2371,6 +2401,9 @@ export default function App() {
           uid,
           nickname: profile?.nickname || profile?.displayName || uid.slice(0, 6),
           role: profile?.role || 'custom',
+          displayTitle: profile?.customTitle || ROLE_DEFAULTS[profile?.role || '']?.meta.label || String(profile?.role || 'Custom'),
+          email: profile?.email,
+          photoURL: profile?.photoURL || '',
           target,
           credits,
           count,
@@ -2479,6 +2512,42 @@ export default function App() {
   const openManagedKpiEditor = (uid: string) => {
     setAdminManagedUid(uid);
     setShowKpiEditor(true);
+  };
+
+  const handleDeleteManagedUser = async (uid: string) => {
+    if (!isSuperAdmin || !currentUser) return;
+    if (uid === currentUser.uid) {
+      showToast('ไม่สามารถลบบัญชีของตัวเองได้');
+      return;
+    }
+
+    const profile = adminProfileMap.get(uid);
+    const label = profile?.nickname || profile?.displayName || profile?.email || uid;
+    const email = profile?.email || '';
+    const firstConfirm = window.confirm(
+      `ลบผู้ใช้ "${label}" ออกจากระบบทั้งหมด?\n\nระบบจะลบทั้งข้อมูลในแอพ, Google Sheets projection และ Firebase Authentication`
+    );
+    if (!firstConfirm) return;
+
+    const expectedToken = profile?.nickname?.trim() || email || uid;
+    const typed = window.prompt(`พิมพ์ "${expectedToken}" เพื่อยืนยันการลบขั้นสุดท้าย`);
+    if ((typed || '').trim() !== expectedToken) {
+      showToast('ยืนยันการลบไม่ถูกต้อง');
+      return;
+    }
+
+    setIsLoading(true);
+    try {
+      await adminDeleteUserCallable({ uid });
+      setAdminManagedUid(null);
+      setShowKpiEditor(false);
+      showToast(`ลบผู้ใช้ "${label}" แล้ว`);
+    } catch (error) {
+      console.error(error);
+      showToast(`ลบผู้ใช้ไม่สำเร็จ: ${(error as Error).message}`);
+    } finally {
+      setIsLoading(false);
+    }
   };
 
   // ── CRUD handlers
@@ -2887,7 +2956,8 @@ export default function App() {
     return (
       <AuthNicknameSetupScreen
         defaultValue={currentUser.displayName?.split(' ')[0] || ''}
-        onSave={handleSaveNickname}
+        defaultTitle={userProfile?.customTitle || ROLE_DEFAULTS[userProfile?.role || '']?.meta.label || ''}
+        onSave={handleSaveProfileBasics}
       />
     );
   }
@@ -2936,6 +3006,13 @@ export default function App() {
           subtitle={adminManagedUid
             ? 'ปรับกลุ่มงาน · รายการ · Credits · เป้าหมายรายเดือน'
             : 'กลุ่มงาน · รายการ · Credits · เป้าหมาย'}
+          deleteAction={adminManagedUid && managedAdminProfile
+            ? {
+                label: `ลบ ${managedAdminProfile.nickname || managedAdminProfile.displayName || managedAdminProfile.email} ออกจากระบบ`,
+                helper: 'ลบทั้งข้อมูลใน Firestore, Google Sheets projection และ Firebase Authentication โดยมีการยืนยัน 2 ชั้น',
+                onDelete: () => handleDeleteManagedUser(adminManagedUid),
+              }
+            : undefined}
         />
       )}
 

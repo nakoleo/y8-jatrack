@@ -54,14 +54,17 @@ Project: `/Users/nakoleo/Documents/COMPANIES/Y8 - YOUNG AGE/Y8 PROJECT/JATRACK A
   - monthly target
   - KPI percent
   - entry count
+- Admin cards should render Google profile photos from `users/{uid}.photoURL` when available
 - Delete button is removed from Admin UI
 - Clicking a person opens KPI/group/task management for that user
 - User order is stored in `system/appConfig.admin.userOrder`
+- Managed-user view now includes destructive removal with 2-step confirmation and backend deletion of both app data and Firebase Auth account
 
 ### User settings
 - Normal users see central calendar as read-only
 - Super admin can validate and update calendar feed URL
 - Gemini API key is not stored in the client
+- First-time users must complete both `nickname` and `customTitle`
 
 ## Files to know first
 - `src/app/App.tsx` — main shell, listeners, entry CRUD, admin state

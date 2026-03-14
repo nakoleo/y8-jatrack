@@ -1,4 +1,5 @@
 import { initializeApp } from 'firebase-admin/app';
+import { getAuth } from 'firebase-admin/auth';
 import { getFirestore } from 'firebase-admin/firestore';
 import { HttpsError, onCall } from 'firebase-functions/v2/https';
 import { defineSecret, defineString } from 'firebase-functions/params';
@@ -17,6 +18,7 @@ const GOOGLE_SERVICE_ACCOUNT_JSON = defineSecret('GOOGLE_SERVICE_ACCOUNT_JSON');
 const GEMINI_API_KEY = defineSecret('GEMINI_API_KEY');
 
 const firestore = getFirestore();
+const adminAuth = getAuth();
 
 const isSuperAdminEmail = (email?: string | null) => (email || '').trim().toLowerCase() === SUPER_ADMIN_EMAIL;
 
@@ -327,6 +329,22 @@ export const adminDeleteUser = onCall(
     await getSheetsService().deleteUserArtifacts(uid, nickname);
     await firestore.recursiveDelete(userRef);
     await firestore.doc(`kpiConfigs/${uid}`).delete().catch(() => undefined);
+    const appConfigSnap = await getCalendarConfigRef().get();
+    const existingOrder = Array.isArray((appConfigSnap.data() as { admin?: { userOrder?: string[] } } | undefined)?.admin?.userOrder)
+      ? ((appConfigSnap.data() as { admin?: { userOrder?: string[] } }).admin?.userOrder || []).map((value) => String(value))
+      : [];
+    if (existingOrder.includes(uid)) {
+      await getCalendarConfigRef().set({
+        admin: {
+          userOrder: existingOrder.filter((value) => value !== uid),
+          updatedAt: Date.now(),
+        },
+      }, { merge: true });
+    }
+    await adminAuth.deleteUser(uid).catch((error) => {
+      logger.error('Failed to delete Firebase Auth user', { uid, error });
+      throw new HttpsError('internal', 'Deleted app data but failed to delete Auth account.');
+    });
 
     return { ok: true };
   },

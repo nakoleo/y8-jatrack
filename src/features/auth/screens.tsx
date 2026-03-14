@@ -136,20 +136,24 @@ export const SignInScreen = ({
 
 export const NicknameSetupScreen = ({
   defaultValue,
+  defaultTitle,
   onSave,
 }: {
   defaultValue: string;
-  onSave: (nickname: string) => Promise<boolean>;
+  defaultTitle: string;
+  onSave: (nickname: string, customTitle: string) => Promise<boolean>;
 }) => {
   const [nickname, setNickname] = useState(defaultValue);
+  const [customTitle, setCustomTitle] = useState(defaultTitle);
   const [saving, setSaving] = useState(false);
 
   const handleSave = async () => {
     const trimmed = nickname.trim();
-    if (!trimmed) return;
+    const trimmedTitle = customTitle.trim();
+    if (!trimmed || !trimmedTitle) return;
     setSaving(true);
     try {
-      await onSave(trimmed);
+      await onSave(trimmed, trimmedTitle);
     } finally {
       setSaving(false);
     }
@@ -159,8 +163,8 @@ export const NicknameSetupScreen = ({
     <div className="flex flex-col min-h-[100dvh] max-w-md mx-auto bg-[#FDFAF7] px-6 pt-[calc(3rem+env(safe-area-inset-top))] pb-10">
       <div className="flex flex-col items-center mb-8 animate-in zoom-in duration-400">
         <div className="mb-4"><AppLogo size={68} /></div>
-        <h1 className="text-[16px] font-bold text-[#2C2A28] tracking-wide">ตั้งชื่อเล่นก่อนเริ่มใช้งาน</h1>
-        <p className="mt-1 text-center text-[11px] leading-relaxed text-slate-500">ใช้สำหรับชื่อรายงานและการอ้างอิงในระบบ</p>
+        <h1 className="text-[16px] font-bold text-[#2C2A28] tracking-wide">ตั้งค่าโปรไฟล์ก่อนเริ่มใช้งาน</h1>
+        <p className="mt-1 text-center text-[11px] leading-relaxed text-slate-500">ระบุชื่อเล่นและตำแหน่งงานให้ครบเพื่อใช้ในรายงานและหน้า Admin</p>
       </div>
 
       <div className="panel-card rounded-[22px] p-5 space-y-4">
@@ -175,12 +179,22 @@ export const NicknameSetupScreen = ({
             className="w-full px-4 py-3 bg-[#FDFAF7] border border-slate-200 rounded-xl text-[14px] font-semibold outline-none"
           />
         </div>
+        <div className="space-y-1.5">
+          <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Display title</label>
+          <input
+            value={customTitle}
+            maxLength={40}
+            onChange={(event) => setCustomTitle(event.target.value)}
+            placeholder="เช่น Art Director, Graphic Designer"
+            className="w-full px-4 py-3 bg-[#FDFAF7] border border-slate-200 rounded-xl text-[14px] font-semibold outline-none"
+          />
+        </div>
         <button
           onClick={handleSave}
-          disabled={saving || !nickname.trim()}
+          disabled={saving || !nickname.trim() || !customTitle.trim()}
           className="btn-primary w-full rounded-xl py-3.5 text-[13px] font-bold disabled:opacity-60"
         >
-          {saving ? 'กำลังบันทึก...' : 'บันทึกชื่อเล่น'}
+          {saving ? 'กำลังบันทึก...' : 'บันทึกโปรไฟล์'}
         </button>
       </div>
     </div>

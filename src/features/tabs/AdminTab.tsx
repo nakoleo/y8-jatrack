@@ -7,6 +7,9 @@ export interface AdminSummaryRow {
   uid: string;
   nickname: string;
   role: string;
+  displayTitle: string;
+  email?: string;
+  photoURL?: string;
   target: number;
   credits: number;
   count: number;
@@ -106,9 +109,17 @@ export function AdminTab({
                     onClick={() => onManageUser(row.uid)}
                     className="flex flex-1 items-start gap-3 min-w-0 text-left"
                   >
-                    <div className="w-10 h-10 rounded-[14px] bg-orange-50 text-[#F4823C] flex items-center justify-center text-[12px] font-black shrink-0">
-                      {index + 1}
-                    </div>
+                    {row.photoURL ? (
+                      <img
+                        src={row.photoURL}
+                        alt={row.nickname}
+                        className="w-10 h-10 rounded-[14px] object-cover border border-orange-100 shadow-sm shrink-0"
+                      />
+                    ) : (
+                      <div className="w-10 h-10 rounded-[14px] bg-orange-50 text-[#F4823C] flex items-center justify-center text-[12px] font-black shrink-0">
+                        {index + 1}
+                      </div>
+                    )}
                     <div className="min-w-0 flex-1">
                       <div className="flex flex-wrap items-center gap-2">
                         <p className="text-[13px] font-bold text-[#2C2A28] truncate">{row.nickname}</p>
@@ -118,8 +129,9 @@ export function AdminTab({
                         <span className="text-[9px] font-bold uppercase tracking-widest text-slate-300">จัดการ</span>
                       </div>
                       <p className="text-[10px] text-slate-400 mt-0.5">
-                        {ROLE_EMOJI[row.role] || '⚙️'} {ROLE_DEFAULTS[row.role]?.meta.label || row.role}
+                        {ROLE_EMOJI[row.role] || '⚙️'} {row.displayTitle || ROLE_DEFAULTS[row.role]?.meta.label || row.role}
                       </p>
+                      {row.email && <p className="text-[10px] text-slate-300 truncate mt-0.5">{row.email}</p>}
                       <div className="mt-3 grid grid-cols-2 gap-2 text-[11px] text-slate-500 sm:grid-cols-4">
                         <div className="rounded-2xl bg-slate-50 px-3 py-2">
                           <p className="text-[9px] font-bold uppercase tracking-widest text-slate-300">Month</p>
