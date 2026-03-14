@@ -1185,6 +1185,7 @@ export default function App() {
     const unsubscribe = onSnapshot(
       doc(db, 'users', currentUser.uid),
       async (snap) => {
+        const defaultTitle = ROLE_DEFAULTS[forcedRole]?.meta.label || 'Custom';
         if (snap.exists()) {
           const profile = snap.data() as UserProfile;
           const merged: UserProfile = {
@@ -1195,13 +1196,14 @@ export default function App() {
             photoURL: currentUser.photoURL || profile.photoURL || '',
             role: forcedRole,
             isAdmin: forcedAdmin,
+            customTitle: profile.customTitle || defaultTitle,
+            settings: profile.settings,
             createdAt: profile.createdAt || now,
             updatedAt: now,
           };
           setUserProfile(merged);
           setNicknameDraft(merged.nickname || '');
-          // ── Load persistent settings + customTitle from Firestore
-          if (profile.customTitle) setCustomTitleDraft(profile.customTitle);
+          setCustomTitleDraft(merged.customTitle || '');
           if (profile.settings) {
             const s = profile.settings;
             if (s.autoHoverExpand !== undefined) setAutoHoverExpand(s.autoHoverExpand);
@@ -1216,7 +1218,8 @@ export default function App() {
             profile.isAdmin !== merged.isAdmin ||
             profile.email !== merged.email ||
             profile.displayName !== merged.displayName ||
-            (profile.photoURL || '') !== (merged.photoURL || '')
+            (profile.photoURL || '') !== (merged.photoURL || '') ||
+            (profile.customTitle || '') !== (merged.customTitle || '')
           ) {
             await setDoc(doc(db, 'users', currentUser.uid), {
               role: merged.role,
@@ -1224,6 +1227,7 @@ export default function App() {
               email: merged.email,
               displayName: merged.displayName,
               photoURL: merged.photoURL || '',
+              customTitle: merged.customTitle || defaultTitle,
               updatedAt: now,
             }, { merge: true });
           }
@@ -1236,12 +1240,14 @@ export default function App() {
             photoURL: currentUser.photoURL || '',
             role: forcedRole,
             isAdmin: forcedAdmin,
+            customTitle: ROLE_DEFAULTS[forcedRole]?.meta.label || 'Custom',
             createdAt: now,
             updatedAt: now,
           };
           await setDoc(doc(db, 'users', currentUser.uid), profile, { merge: true });
           setUserProfile(profile);
           setNicknameDraft('');
+          setCustomTitleDraft(profile.customTitle || '');
         }
         setProfileLoading(false);
       },
@@ -2422,8 +2428,15 @@ export default function App() {
     () => new Map(adminProfiles.map((profile) => [profile.uid, profile])),
     [adminProfiles],
   );
+  const adminSummaryMap = useMemo(
+    () => new Map(adminSummary.map((row) => [row.uid, row])),
+    [adminSummary],
+  );
   const managedAdminProfile = adminManagedUid ? adminProfileMap.get(adminManagedUid) || null : null;
-  const managedAdminSeed = managedAdminProfile ? getInitialKpiForEmail(managedAdminProfile.email) : null;
+  const managedAdminSummary = adminManagedUid ? adminSummaryMap.get(adminManagedUid) || null : null;
+  const managedAdminSeed = adminManagedUid
+    ? getInitialKpiForEmail(managedAdminProfile?.email || managedAdminSummary?.email || null)
+    : null;
   const managedAdminConfig = adminManagedUid
     ? adminKpiConfigs[adminManagedUid]?.groups || managedAdminSeed?.groups || ZERO_STARTER_GROUPS
     : null;
@@ -2522,14 +2535,15 @@ export default function App() {
     }
 
     const profile = adminProfileMap.get(uid);
-    const label = profile?.nickname || profile?.displayName || profile?.email || uid;
-    const email = profile?.email || '';
+    const summary = adminSummaryMap.get(uid);
+    const label = profile?.nickname || profile?.displayName || summary?.nickname || profile?.email || summary?.email || uid;
+    const email = profile?.email || summary?.email || '';
     const firstConfirm = window.confirm(
       `ลบผู้ใช้ "${label}" ออกจากระบบทั้งหมด?\n\nระบบจะลบทั้งข้อมูลในแอพ, Google Sheets projection และ Firebase Authentication`
     );
     if (!firstConfirm) return;
 
-    const expectedToken = profile?.nickname?.trim() || email || uid;
+    const expectedToken = profile?.nickname?.trim() || summary?.nickname?.trim() || email || uid;
     const typed = window.prompt(`พิมพ์ "${expectedToken}" เพื่อยืนยันการลบขั้นสุดท้าย`);
     if ((typed || '').trim() !== expectedToken) {
       showToast('ยืนยันการลบไม่ถูกต้อง');
@@ -3001,14 +3015,14 @@ export default function App() {
             setAdminManagedUid(null);
           }}
           title={adminManagedUid
-            ? `จัดการ KPI ของ ${managedAdminProfile?.nickname || managedAdminProfile?.displayName || managedAdminProfile?.email || 'สมาชิก'}`
+            ? `จัดการ KPI ของ ${managedAdminProfile?.nickname || managedAdminProfile?.displayName || managedAdminSummary?.nickname || managedAdminProfile?.email || managedAdminSummary?.email || 'สมาชิก'}`
             : 'จัดการ KPI ของฉัน'}
           subtitle={adminManagedUid
             ? 'ปรับกลุ่มงาน · รายการ · Credits · เป้าหมายรายเดือน'
             : 'กลุ่มงาน · รายการ · Credits · เป้าหมาย'}
-          deleteAction={adminManagedUid && managedAdminProfile
+          deleteAction={adminManagedUid
             ? {
-                label: `ลบ ${managedAdminProfile.nickname || managedAdminProfile.displayName || managedAdminProfile.email} ออกจากระบบ`,
+                label: `ลบ ${managedAdminProfile?.nickname || managedAdminProfile?.displayName || managedAdminSummary?.nickname || managedAdminProfile?.email || managedAdminSummary?.email || 'ผู้ใช้นี้'} ออกจากระบบ`,
                 helper: 'ลบทั้งข้อมูลใน Firestore, Google Sheets projection และ Firebase Authentication โดยมีการยืนยัน 2 ชั้น',
                 onDelete: () => handleDeleteManagedUser(adminManagedUid),
               }
