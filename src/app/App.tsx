@@ -48,13 +48,21 @@ import type {
   WorkGroups,
 } from '@/domain/types';
 import { ROLE_DEFAULTS, ROLE_EMOJI } from '@/config/roleDefaults';
+import {
+  HOST_EMAIL, SUPER_ADMIN_EMAIL, KPI_POLICY_VERSION,
+  EXPECTED_FIREBASE_PROJECT, EXPECTED_FIREBASE_AUTH_DOMAIN,
+  ZERO_STARTER_GROUPS, normalizeEmail, isHostEmail, isSuperAdminEmail,
+  resolveRoleByEmail, cloneGroups, getTodayStr, dateToLocalStr,
+  safePercent, getInitialKpiForEmail, scopedKey, formatThaiDate,
+  getMonthNameThai, extractGoogleApiReason, normalizeFileName,
+  type PendingUploadFile,
+} from '@/lib/appHelpers';
+import {
+  DEFAULT_REPORT_EMOJIS, getCurrentTimeHM, sanitizeList,
+  buildMorningReportText, buildEveningReportText,
+} from '@/features/reports/reportText';
 
-// ─── HELPERS ─────────────────────────────────────────────────────────────────
-const HOST_EMAIL = 'host.y8@gmail.com';
-const SUPER_ADMIN_EMAIL = 'info.nakoleo@gmail.com';
-const KPI_POLICY_VERSION = 3;
-const EXPECTED_FIREBASE_PROJECT = 'jartrack-y8pv';
-const EXPECTED_FIREBASE_AUTH_DOMAIN = 'jartrack-y8pv.firebaseapp.com';
+// ─── APP-LOCAL CONSTANTS ─────────────────────────────────────────────────────
 const DEFAULT_ORG_CALENDAR_CONFIG: OrgCalendarConfig = {
   enabled: true,
   label: 'Y8 Content',
@@ -65,42 +73,6 @@ const DEFAULT_ORG_CALENDAR_CONFIG: OrgCalendarConfig = {
   lastEventCount: 0,
 };
 
-const ZERO_STARTER_GROUPS: WorkGroups = {
-  A: {
-    label: 'Group A',
-    name: 'กลุ่มเริ่มต้น',
-    color: '#F4823C',
-    bg: 'rgba(244,130,60,0.12)',
-    border: 'rgba(244,130,60,0.22)',
-    tasks: [
-      { id: 'A01', name: 'งานเริ่มต้น', creditPerUnit: 0, unit: 'งาน', desc: 'ตั้งค่าเครดิตได้เองใน KPI Config' },
-    ],
-  },
-};
-
-const normalizeEmail = (email?: string | null) => (email || '').trim().toLowerCase();
-const isHostEmail = (email?: string | null) => normalizeEmail(email) === HOST_EMAIL;
-const isSuperAdminEmail = (email?: string | null) => normalizeEmail(email) === SUPER_ADMIN_EMAIL;
-const resolveRoleByEmail = (email?: string | null): RoleId =>
-  isHostEmail(email) ? 'graphic_designer' : isSuperAdminEmail(email) ? 'art_director' : 'custom';
-
-const cloneGroups = (groups: WorkGroups): WorkGroups => JSON.parse(JSON.stringify(groups));
-
-const getTodayStr = () => {
-  const now = new Date();
-  const y = now.getFullYear();
-  const m = String(now.getMonth() + 1).padStart(2, '0');
-  const d = String(now.getDate()).padStart(2, '0');
-  return `${y}-${m}-${d}`;
-};
-
-const dateToLocalStr = (date: Date) => {
-  const y = date.getFullYear();
-  const m = String(date.getMonth() + 1).padStart(2, '0');
-  const d = String(date.getDate()).padStart(2, '0');
-  return `${y}-${m}-${d}`;
-};
-
 const dateKeyInTimezone = (value: string | Date, timezone: string) =>
   new Intl.DateTimeFormat('en-CA', {
     year: 'numeric',
@@ -108,177 +80,6 @@ const dateKeyInTimezone = (value: string | Date, timezone: string) =>
     day: '2-digit',
     timeZone: timezone,
   }).format(typeof value === 'string' ? new Date(value) : value);
-
-const safePercent = (value: number, target: number) =>
-  target > 0 ? Math.min((value / target) * 100, 100) : 0;
-
-const getInitialKpiForEmail = (email?: string | null) => {
-  if (isHostEmail(email)) {
-    const graphic = ROLE_DEFAULTS.graphic_designer;
-    return {
-      groups: cloneGroups(graphic.groups),
-      monthlyTarget: graphic.meta.monthlyTarget,
-      roleId: 'graphic_designer',
-      label: graphic.meta.label,
-    };
-  }
-  return {
-    groups: cloneGroups(ZERO_STARTER_GROUPS),
-    monthlyTarget: 0,
-    roleId: resolveRoleByEmail(email),
-    label: 'Custom',
-  };
-};
-
-const scopedKey = (uid: string, key: string) => `jartrack_${uid}_${key}`;
-
-const formatThaiDate = (dateStr: string, full = false) => {
-  if (!dateStr) return '';
-  try {
-    const date = new Date(dateStr + 'T00:00:00');
-    if (isNaN(date.getTime())) return dateStr;
-    return date.toLocaleDateString('th-TH', {
-      day: 'numeric',
-      month: full ? 'long' : 'short',
-      year: full ? 'numeric' : '2-digit',
-    });
-  } catch {
-    return dateStr;
-  }
-};
-
-const getMonthNameThai = (monthIndex: number) =>
-  new Intl.DateTimeFormat('th-TH', { month: 'long' }).format(new Date(2026, monthIndex));
-
-const extractGoogleApiReason = (raw: string) => {
-  if (!raw) return '';
-  try {
-    const json = JSON.parse(raw) as {
-      error?: { status?: string; message?: string; errors?: Array<{ reason?: string; message?: string }> };
-    };
-    return json.error?.errors?.[0]?.reason || json.error?.status || json.error?.message || '';
-  } catch {
-    return raw.slice(0, 120);
-  }
-};
-
-const DEFAULT_REPORT_EMOJIS = {
-  focus: '🚩',
-  routine: '📌',
-  results: '📄',
-  nextMove: '🔜',
-  issues: '⚠️',
-} as const;
-
-const getCurrentTimeHM = () =>
-  new Date().toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
-
-const sanitizeList = (items: string[]) => items.map((item) => item.trim()).filter(Boolean);
-
-const buildDailyLineItems = (items: string[], prefix: string) =>
-  sanitizeList(items)
-    .map((item, index) => (prefix === '✔️' ? `${prefix} ${item}` : `• ${prefix}${index + 1}] ${item}`))
-    .join('\n\n');
-
-const getReportClosing = (gender: 'male' | 'female') => (gender === 'female' ? 'ขอบคุณค่ะ' : 'ขอบคุณครับ');
-
-const buildMorningReportText = (report: {
-  nickname: string;
-  date: string;
-  gender: 'male' | 'female';
-  checkInTime: string;
-  focusItems: string[];
-  focusEmoji: string;
-}) => {
-  const focusText = buildDailyLineItems(report.focusItems, 'F') || '-';
-  const timeStr = report.checkInTime ? `${report.checkInTime} น.` : '-';
-  return `MORNING REPORT: ${report.nickname}
-Date: ${report.date}
-Check-in Time: ${timeStr}
-
------------------------------------
-${report.focusEmoji} FOCUS (งานที่โฟกัสหรือเร่งด่วนวันนี้)
-
-${focusText}
-
------------------------------------
-🙏 ${getReportClosing(report.gender)}`;
-};
-
-const buildEveningReportText = (report: {
-  nickname: string;
-  date: string;
-  gender: 'male' | 'female';
-  routineItems: string[];
-  resultItems: string[];
-  nextMoveItems: string[];
-  issues: string;
-  issueStatus: 'resolved' | 'unresolved';
-  issueDetail: string;
-  issueNextStep: string;
-  routineEmoji: string;
-  resultsEmoji: string;
-  nextMoveEmoji: string;
-  issuesEmoji: string;
-}) => {
-  const routineText = buildDailyLineItems(report.routineItems, '✔️') || '✔️ -';
-  const resultsText = buildDailyLineItems(report.resultItems, 'R') || '• R1] -';
-  const nextMoveText = buildDailyLineItems(report.nextMoveItems, 'N') || '• N1] -';
-  let issueSection = `${report.issuesEmoji}ISSUES (ปัญหาที่พบในวันนี้): ${report.issues.trim() || 'ไม่มี'}`;
-  if (report.issues.trim() && report.issues.trim() !== 'ไม่มี') {
-    issueSection += `\nสถานะ: ${report.issueStatus === 'resolved' ? '✅ แก้ไขได้แล้ว' : '❌ ยังแก้ไขไม่ได้'}`;
-    if (report.issueDetail.trim()) issueSection += `\nรายละเอียด: ${report.issueDetail.trim()}`;
-    if (report.issueNextStep.trim()) issueSection += `\nแนวทางดำเนินการต่อ: ${report.issueNextStep.trim()}`;
-  }
-  return `EVENING REPORT: ${report.nickname}
-Date: ${report.date}
-
------------------------------------
-${report.routineEmoji} ROUTINE
-
-${routineText}
-
------------------------------------
-${report.resultsEmoji}RESULTS (ผลลัพธ์ของงานวันนี้):
-
-${resultsText}
-
------------------------------------
-${report.nextMoveEmoji}NEXT MOVE (พรุ่งนี้จะทำอะไรต่อ):
-
-${nextMoveText}
-
------------------------------------
-${issueSection}
-
------------------------------------
-🙏 ${getReportClosing(report.gender)}`;
-};
-
-/**
- * สร้างชื่อไฟล์มาตรฐาน: [TASKID]_[DDMMYYYY]_[NICKNAME]_[NN].[ext]
- * เช่น A01_08032026_tontawan_01.jpg
- */
-const normalizeFileName = (
-  originalName: string,
-  taskId: string,
-  entryDate: string,  // 'YYYY-MM-DD'
-  nickname: string,
-  index: number,
-): string => {
-  const ext = originalName.split('.').pop()?.toLowerCase() || 'bin';
-  const [y = '0000', m = '00', d = '00'] = entryDate.split('-');
-  const ddmmyyyy = `${d}${m}${y}`;
-  const nick = nickname.toLowerCase().replace(/\s+/g, '_').replace(/[^a-z0-9_]/g, '') || 'user';
-  const seq = String(index + 1).padStart(2, '0');
-  return `${taskId}_${ddmmyyyy}_${nick}_${seq}.${ext}`;
-};
-
-interface PendingUploadFile {
-  file: File;
-  normalizedName: string;
-  mode: 'log' | 'edit';
-}
 
 // ─── MODAL ───────────────────────────────────────────────────────────────────
 const Modal = ({
