@@ -55,7 +55,7 @@ import {
   ZERO_STARTER_GROUPS, normalizeEmail, isHostEmail, isSuperAdminEmail,
   resolveRoleByEmail, cloneGroups, getTodayStr, dateToLocalStr,
   safePercent, getInitialKpiForEmail, scopedKey, formatThaiDate,
-  MANUAL_PROFILE_PHOTOS, resolveProfilePhotoUrl, resolveProfileTitle,
+  MANUAL_PROFILE_PHOTOS, resolveProfilePhotoUrl, resolveProfileTitle, sanitizeFirestoreValue,
   getMonthNameThai, extractGoogleApiReason, normalizeFileName,
   type PendingUploadFile,
 } from '@/lib/appHelpers';
@@ -1153,6 +1153,12 @@ export default function App() {
     if (code.endsWith('permission-denied')) return 'บัญชีนี้ไม่มีสิทธิ์เข้าถึงข้อมูลนี้';
     if (code.endsWith('internal')) return 'เชื่อมต่อบริการเบื้องหลังไม่สำเร็จ';
     return message || 'เชื่อมต่อบริการไม่สำเร็จ';
+  };
+  const describeSaveError = (error: unknown) => {
+    const message = typeof error === 'object' && error && 'message' in error ? String((error as { message?: string }).message || '') : '';
+    if (message.includes('Unsupported field value: undefined')) return 'ข้อมูลของงานนี้ยังไม่ครบใน KPI Config';
+    if (message.includes('Function setDoc() called with invalid data')) return 'ข้อมูลของงานนี้ยังไม่ครบใน KPI Config';
+    return message || 'ไม่สามารถบันทึกข้อมูลได้';
   };
 
   // ── Firebase Auth listener (Phase 3)
@@ -2590,7 +2596,9 @@ export default function App() {
     if (!currentUser || !currentTask) return;
     const now = Date.now();
     const id = crypto.randomUUID ? crypto.randomUUID() : Math.random().toString(36).substr(2, 9);
-    const newEntry: WorkEntry = {
+    const safeCreditPerUnit = Number.isFinite(currentTask.creditPerUnit) ? currentTask.creditPerUnit : 0;
+    const safeQuantity = Number.isFinite(quantity) && quantity > 0 ? quantity : 1;
+    const newEntry = sanitizeFirestoreValue<WorkEntry>({
       id,
       date:      selectedDate,
       user:      currentUser.uid,
@@ -2600,12 +2608,12 @@ export default function App() {
       groupId:   selectedGroup,
       groupName: kpiConfig[selectedGroup]?.name || selectedGroup,
       taskId:    selectedTaskId,
-      taskName:  currentTask.name,
-      quantity,
-      unit:      currentTask.unit,
-      creditPerUnit: currentTask.creditPerUnit,
-      brands:    currentTask.brands || kpiConfig[selectedGroup]?.brands || [],
-      credits:   quantity * currentTask.creditPerUnit,
+      taskName:  currentTask.name || selectedTaskId,
+      quantity: safeQuantity,
+      unit:      currentTask.unit || 'งาน',
+      creditPerUnit: safeCreditPerUnit,
+      brands:    (currentTask.brands || kpiConfig[selectedGroup]?.brands || []).filter(Boolean),
+      credits:   safeQuantity * safeCreditPerUnit,
       notes,
       createdAt: now,
       updatedAt: now,
@@ -2622,7 +2630,7 @@ export default function App() {
         : {}),
       ...(logAttachments.length > 0 ? { attachments: logAttachments } : {}),
       ...(pendingLocalFiles.length > 0 ? { localFiles: pendingLocalFiles } : {}),
-    };
+    });
     setIsLoading(true);
     try {
       await setDoc(doc(db, 'users', currentUser.uid, 'entries', id), newEntry);
@@ -2639,7 +2647,7 @@ export default function App() {
       setPendingLocalFiles([]);
     } catch (e) {
       console.error(e);
-      showToast('❌ บันทึกไม่สำเร็จ');
+      showToast(`❌ บันทึกไม่สำเร็จ: ${describeSaveError(e)}`);
     } finally {
       setIsLoading(false);
     }
@@ -2650,18 +2658,21 @@ export default function App() {
     const task = kpiConfig[editEntry.groupId]?.tasks.find((t) => t.id === editEntry.taskId);
     if (!task) return;
     const updatedAt = Date.now();
-    const updated = {
+    const safeCreditPerUnit = Number.isFinite(task.creditPerUnit) ? task.creditPerUnit : 0;
+    const safeQuantity = Number.isFinite(editEntry.quantity) && editEntry.quantity > 0 ? editEntry.quantity : 1;
+    const updated = sanitizeFirestoreValue({
       ...editEntry,
       email: normalizeEmail(currentUser.email),
       userName: displayName,
       role: userProfile?.customTitle || String(userProfile?.role || 'custom'),
       groupName: kpiConfig[editEntry.groupId]?.name || editEntry.groupId,
-      taskName: task.name,
-      unit: task.unit,
-      creditPerUnit: task.creditPerUnit,
-      brands: task.brands || kpiConfig[editEntry.groupId]?.brands || [],
+      taskName: task.name || editEntry.taskId,
+      quantity: safeQuantity,
+      unit: task.unit || 'งาน',
+      creditPerUnit: safeCreditPerUnit,
+      brands: (task.brands || kpiConfig[editEntry.groupId]?.brands || []).filter(Boolean),
       channel: task.channel,
-      credits: editEntry.quantity * task.creditPerUnit,
+      credits: safeQuantity * safeCreditPerUnit,
       updatedAt,
       sheetSync: {
         status: 'pending' as const,
@@ -2669,7 +2680,7 @@ export default function App() {
         lastAttemptedAt: updatedAt,
         revision: editEntry.sheetSync?.revision || 0,
       },
-    };
+    });
     setIsLoading(true);
     try {
       await setDoc(doc(db, 'users', currentUser.uid, 'entries', updated.id), updated);
@@ -2681,7 +2692,7 @@ export default function App() {
       });
     } catch (e) {
       console.error(e);
-      showToast('❌ อัปเดตไม่สำเร็จ');
+      showToast(`❌ อัปเดตไม่สำเร็จ: ${describeSaveError(e)}`);
     } finally {
       setIsLoading(false);
     }

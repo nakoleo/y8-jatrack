@@ -74,6 +74,24 @@ export const resolveProfileTitle = ({
   return nextCustomTitle || manual || roleLabel;
 };
 
+export const sanitizeFirestoreValue = <T>(value: T): T => {
+  if (Array.isArray(value)) {
+    return value
+      .map((item) => sanitizeFirestoreValue(item))
+      .filter((item) => item !== undefined) as T;
+  }
+  if (value && typeof value === 'object') {
+    const entries = Object.entries(value as Record<string, unknown>)
+      .flatMap(([key, nested]) => {
+        const sanitized = sanitizeFirestoreValue(nested);
+        return sanitized === undefined ? [] : [[key, sanitized] as const];
+      });
+    return Object.fromEntries(entries) as T;
+  }
+  if (value === undefined) return undefined as T;
+  return value;
+};
+
 export const resolveRoleByEmail = (email?: string | null): RoleId =>
   isHostEmail(email) ? 'graphic_designer' : isSuperAdminEmail(email) ? 'art_director' : 'custom';
 

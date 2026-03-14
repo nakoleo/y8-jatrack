@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { resolveProfilePhotoUrl, resolveProfileTitle } from './appHelpers';
+import { resolveProfilePhotoUrl, resolveProfileTitle, sanitizeFirestoreValue } from './appHelpers';
 
 describe('resolveProfilePhotoUrl', () => {
   it('prefers manual profile overrides for Gift', () => {
@@ -31,5 +31,22 @@ describe('resolveProfilePhotoUrl', () => {
         customTitle: 'Graphic Designer',
       }),
     ).toBe('Sr.Graphic Designer');
+  });
+
+  it('strips undefined values from nested Firestore payloads', () => {
+    expect(
+      sanitizeFirestoreValue({
+        taskName: 'Poster',
+        channel: undefined,
+        attachments: [
+          { fileId: '1', mimeType: undefined, link: 'https://example.com' },
+        ],
+      }),
+    ).toEqual({
+      taskName: 'Poster',
+      attachments: [
+        { fileId: '1', link: 'https://example.com' },
+      ],
+    });
   });
 });
