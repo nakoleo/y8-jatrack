@@ -16,6 +16,11 @@ service cloud.firestore {
       return signedIn() && request.auth.uid == uid;
     }
 
+    // Collection group rule — required for collectionGroup('entries') admin query
+    match /{path=**}/entries/{entryId} {
+      allow read: if isSuperAdmin();
+    }
+
     match /users/{userId} {
       allow read: if isOwner(userId) || isSuperAdmin();
       allow create: if isOwner(userId);

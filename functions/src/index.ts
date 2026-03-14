@@ -275,7 +275,13 @@ export const getCalendarFeed = onCall(
       throw new HttpsError('unauthenticated', 'Authentication required.');
     }
 
-    const config = await loadCalendarConfig();
+    let config;
+    try {
+      config = await loadCalendarConfig();
+    } catch (error) {
+      logger.error('Failed to load calendar config', { error });
+      return { config: normalizeCalendarConfigData(null), events: [], fetchedAt: Date.now() };
+    }
     if (!config.enabled || !config.y8ContentFeedUrl.trim()) {
       return {
         config: {
