@@ -55,6 +55,7 @@ import {
   ZERO_STARTER_GROUPS, normalizeEmail, isHostEmail, isSuperAdminEmail,
   resolveRoleByEmail, cloneGroups, getTodayStr, dateToLocalStr,
   safePercent, getInitialKpiForEmail, scopedKey, formatThaiDate,
+  MANUAL_PROFILE_PHOTOS, resolveProfilePhotoUrl, resolveProfileTitle,
   getMonthNameThai, extractGoogleApiReason, normalizeFileName,
   type PendingUploadFile,
 } from '@/lib/appHelpers';
@@ -1185,18 +1186,31 @@ export default function App() {
     const unsubscribe = onSnapshot(
       doc(db, 'users', currentUser.uid),
       async (snap) => {
-        const defaultTitle = ROLE_DEFAULTS[forcedRole]?.meta.label || 'Custom';
+        const normalizedCurrentEmail = normalizeEmail(currentUser.email);
+        const defaultTitle = resolveProfileTitle({ email: normalizedCurrentEmail, role: forcedRole });
+        const defaultPhotoOverride = MANUAL_PROFILE_PHOTOS[normalizedCurrentEmail] || '';
         if (snap.exists()) {
           const profile = snap.data() as UserProfile;
+          const persistedPhotoURL = currentUser.photoURL || profile.photoURL || '';
           const merged: UserProfile = {
             uid: currentUser.uid,
             displayName: currentUser.displayName || profile.displayName || 'User',
             nickname: profile.nickname || '',
-            email: normalizeEmail(currentUser.email) || profile.email || '',
-            photoURL: currentUser.photoURL || profile.photoURL || '',
+            email: normalizedCurrentEmail || profile.email || '',
+            photoURL: resolveProfilePhotoUrl({
+              email: normalizedCurrentEmail || profile.email || '',
+              manualPhotoURL: profile.photoURLOverride,
+              googlePhotoURL: currentUser.photoURL,
+              storedPhotoURL: profile.photoURL,
+            }),
+            photoURLOverride: profile.photoURLOverride || defaultPhotoOverride,
             role: forcedRole,
             isAdmin: forcedAdmin,
-            customTitle: profile.customTitle || defaultTitle,
+            customTitle: resolveProfileTitle({
+              email: normalizedCurrentEmail || profile.email || '',
+              role: forcedRole,
+              customTitle: profile.customTitle,
+            }),
             settings: profile.settings,
             createdAt: profile.createdAt || now,
             updatedAt: now,
@@ -1218,7 +1232,8 @@ export default function App() {
             profile.isAdmin !== merged.isAdmin ||
             profile.email !== merged.email ||
             profile.displayName !== merged.displayName ||
-            (profile.photoURL || '') !== (merged.photoURL || '') ||
+            (profile.photoURL || '') !== (persistedPhotoURL || '') ||
+            (profile.photoURLOverride || '') !== (merged.photoURLOverride || '') ||
             (profile.customTitle || '') !== (merged.customTitle || '')
           ) {
             await setDoc(doc(db, 'users', currentUser.uid), {
@@ -1226,7 +1241,8 @@ export default function App() {
               isAdmin: merged.isAdmin,
               email: merged.email,
               displayName: merged.displayName,
-              photoURL: merged.photoURL || '',
+              photoURL: persistedPhotoURL,
+              photoURLOverride: merged.photoURLOverride || '',
               customTitle: merged.customTitle || defaultTitle,
               updatedAt: now,
             }, { merge: true });
@@ -1236,15 +1252,23 @@ export default function App() {
             uid: currentUser.uid,
             displayName: currentUser.displayName || 'User',
             nickname: '',
-            email: normalizeEmail(currentUser.email),
-            photoURL: currentUser.photoURL || '',
+            email: normalizedCurrentEmail,
+            photoURL: resolveProfilePhotoUrl({
+              email: normalizedCurrentEmail,
+              manualPhotoURL: defaultPhotoOverride,
+              googlePhotoURL: currentUser.photoURL,
+            }),
+            photoURLOverride: defaultPhotoOverride,
             role: forcedRole,
             isAdmin: forcedAdmin,
-            customTitle: ROLE_DEFAULTS[forcedRole]?.meta.label || 'Custom',
+            customTitle: defaultTitle,
             createdAt: now,
             updatedAt: now,
           };
-          await setDoc(doc(db, 'users', currentUser.uid), profile, { merge: true });
+          await setDoc(doc(db, 'users', currentUser.uid), {
+            ...profile,
+            photoURL: currentUser.photoURL || '',
+          }, { merge: true });
           setUserProfile(profile);
           setNicknameDraft('');
           setCustomTitleDraft(profile.customTitle || '');
@@ -2407,9 +2431,17 @@ export default function App() {
           uid,
           nickname: profile?.nickname || profile?.displayName || uid.slice(0, 6),
           role: profile?.role || 'custom',
-          displayTitle: profile?.customTitle || ROLE_DEFAULTS[profile?.role || '']?.meta.label || String(profile?.role || 'Custom'),
+          displayTitle: resolveProfileTitle({
+            email: profile?.email,
+            role: profile?.role,
+            customTitle: profile?.customTitle,
+          }),
           email: profile?.email,
-          photoURL: profile?.photoURL || '',
+          photoURL: resolveProfilePhotoUrl({
+            email: profile?.email,
+            manualPhotoURL: profile?.photoURLOverride,
+            storedPhotoURL: profile?.photoURL,
+          }),
           target,
           credits,
           count,

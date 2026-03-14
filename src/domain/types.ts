@@ -120,6 +120,7 @@ export interface UserProfile {
   nickname: string;
   email: string;
   photoURL?: string;
+  photoURLOverride?: string;
   role: RoleId | string;
   isAdmin: boolean;
   createdAt: number;

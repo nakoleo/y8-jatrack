@@ -6,6 +6,12 @@ export const SUPER_ADMIN_EMAIL = 'info.nakoleo@gmail.com';
 export const KPI_POLICY_VERSION = 3;
 export const EXPECTED_FIREBASE_PROJECT = 'jartrack-y8pv';
 export const EXPECTED_FIREBASE_AUTH_DOMAIN = 'jartrack-y8pv.firebaseapp.com';
+export const MANUAL_PROFILE_PHOTOS: Record<string, string> = {
+  [HOST_EMAIL]: '/avatars/gift-display.jpg',
+};
+export const MANUAL_PROFILE_TITLES: Record<string, string> = {
+  [HOST_EMAIL]: 'Sr.Graphic Designer',
+};
 
 export const ZERO_STARTER_GROUPS: WorkGroups = {
   A: {
@@ -37,6 +43,37 @@ export interface PendingUploadFile {
 export const normalizeEmail = (email?: string | null) => (email || '').trim().toLowerCase();
 export const isHostEmail = (email?: string | null) => normalizeEmail(email) === HOST_EMAIL;
 export const isSuperAdminEmail = (email?: string | null) => normalizeEmail(email) === SUPER_ADMIN_EMAIL;
+export const resolveProfilePhotoUrl = ({
+  email,
+  manualPhotoURL,
+  googlePhotoURL,
+  storedPhotoURL,
+}: {
+  email?: string | null;
+  manualPhotoURL?: string | null;
+  googlePhotoURL?: string | null;
+  storedPhotoURL?: string | null;
+}) => {
+  const manual = (manualPhotoURL || '').trim() || MANUAL_PROFILE_PHOTOS[normalizeEmail(email)] || '';
+  return manual || (googlePhotoURL || '').trim() || (storedPhotoURL || '').trim() || '';
+};
+export const resolveProfileTitle = ({
+  email,
+  customTitle,
+  role,
+}: {
+  email?: string | null;
+  customTitle?: string | null;
+  role?: RoleId | string | null;
+}) => {
+  const normalizedEmail = normalizeEmail(email);
+  const manual = MANUAL_PROFILE_TITLES[normalizedEmail] || '';
+  const nextCustomTitle = (customTitle || '').trim();
+  const roleLabel = ROLE_DEFAULTS[role as RoleId]?.meta.label || String(role || 'Custom');
+  if (manual && (!nextCustomTitle || nextCustomTitle === roleLabel)) return manual;
+  return nextCustomTitle || manual || roleLabel;
+};
+
 export const resolveRoleByEmail = (email?: string | null): RoleId =>
   isHostEmail(email) ? 'graphic_designer' : isSuperAdminEmail(email) ? 'art_director' : 'custom';
 

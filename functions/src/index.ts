@@ -326,7 +326,12 @@ export const adminDeleteUser = onCall(
       (userSnap.data()?.displayName as string | undefined) ||
       uid.slice(0, 6);
 
-    await getSheetsService().deleteUserArtifacts(uid, nickname);
+    try {
+      await getSheetsService().deleteUserArtifacts(uid, nickname);
+    } catch (error) {
+      logger.error('Failed to delete user sheet artifacts', { uid, nickname, error });
+    }
+
     await firestore.recursiveDelete(userRef);
     await firestore.doc(`kpiConfigs/${uid}`).delete().catch(() => undefined);
     const appConfigSnap = await getCalendarConfigRef().get();
@@ -341,7 +346,11 @@ export const adminDeleteUser = onCall(
         },
       }, { merge: true });
     }
-    await adminAuth.deleteUser(uid).catch((error) => {
+    await adminAuth.deleteUser(uid).catch((error: { code?: string }) => {
+      if (error?.code === 'auth/user-not-found') {
+        logger.warn('Firebase Auth user already missing during delete', { uid });
+        return;
+      }
       logger.error('Failed to delete Firebase Auth user', { uid, error });
       throw new HttpsError('internal', 'Deleted app data but failed to delete Auth account.');
     });

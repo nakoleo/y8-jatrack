@@ -127,6 +127,7 @@ export function SettingsPanel({
   monthlyTarget,
 }: SettingsPanelProps) {
   const [showAdvanced, setShowAdvanced] = useState(false);
+  const profilePhotoUrl = userProfile?.photoURL || currentUser.photoURL || '';
 
   const calendarStatusLabel = useMemo(() => {
     if (orgCalendarConfig.lastSyncStatus === 'error') return 'มีปัญหา';
@@ -151,8 +152,8 @@ export function SettingsPanel({
       <Section title="Profile" description="ข้อมูลส่วนตัวและชื่อที่ใช้แสดงในระบบ">
         <div className="settings-card md:col-span-2">
           <div className="flex items-center gap-3">
-            {currentUser.photoURL ? (
-              <img src={currentUser.photoURL} alt="avatar" className="h-11 w-11 rounded-full object-cover" />
+            {profilePhotoUrl ? (
+              <img src={profilePhotoUrl} alt="avatar" className="h-11 w-11 rounded-full object-cover" />
             ) : (
               <div className="flex h-11 w-11 items-center justify-center rounded-full bg-slate-100">
                 <UserCircle size={22} className="text-slate-400" />
