@@ -1,14 +1,13 @@
 import { initializeApp } from 'firebase-admin/app';
 import { getFirestore } from 'firebase-admin/firestore';
 import { HttpsError, onCall } from 'firebase-functions/v2/https';
-import { onDocumentWritten } from 'firebase-functions/v2/firestore';
 import { defineSecret, defineString } from 'firebase-functions/params';
 import * as logger from 'firebase-functions/logger';
 
 import { GoogleSheetsGateway, SheetsSyncService } from './sheets.js';
 import { DEFAULT_Y8_CALENDAR_FEED_URL, fetchNormalizedCalendarFeed, normalizeCalendarConfigData } from './calendar.js';
 import { buildFallbackSummary, buildMonthlyStats, generateGeminiSummary, topGroupsForEntries } from './summary.js';
-import type { EntryDocument } from './types.js';
+import type { EntryDocument, EntrySyncAction } from './types.js';
 
 initializeApp();
 
@@ -33,15 +32,8 @@ const getCalendarConfigRef = () => firestore.doc('system/appConfig');
 
 const loadCalendarConfig = async () => {
   const snapshot = await getCalendarConfigRef().get();
-  const data = snapshot.data() as { calendar?: Record<string, unknown> } | undefined;
+  const data = snapshot.data() as { calendar?: Record<string, unknown>; admin?: { userOrder?: string[] } } | undefined;
   return normalizeCalendarConfigData(data?.calendar);
-};
-
-const sanitizeEntryForComparison = (entry: Record<string, unknown> | undefined) => {
-  if (!entry) return null;
-  const clone = { ...entry };
-  delete clone.sheetSync;
-  return clone;
 };
 
 const toEntryDocument = (id: string, payload: Record<string, unknown>): EntryDocument => ({
@@ -87,79 +79,224 @@ const toEntryDocument = (id: string, payload: Record<string, unknown>): EntryDoc
     : undefined,
 });
 
-export const onEntryWrite = onDocumentWritten(
+const resolveSyncUid = (
+  request: { auth?: { uid?: string | null; token?: { email?: string | null } } },
+  requestedUid?: unknown,
+) => {
+  const uid = String(requestedUid || request.auth?.uid || '').trim();
+  if (!uid) {
+    throw new HttpsError('invalid-argument', 'uid is required.');
+  }
+  if (uid !== request.auth?.uid && !isSuperAdminEmail(String(request.auth?.token?.email || ''))) {
+    throw new HttpsError('permission-denied', 'Cannot sync another user entry.');
+  }
+  return uid;
+};
+
+const writeEntrySyncState = async ({
+  uid,
+  entryId,
+  action,
+  revision,
+  status,
+  lastError = null,
+  lastSuccessAt,
+}: {
+  uid: string;
+  entryId: string;
+  action: EntrySyncAction;
+  revision: number;
+  status: 'pending' | 'synced' | 'failed';
+  lastError?: string | null;
+  lastSuccessAt?: number;
+}) => {
+  await firestore.doc(`users/${uid}/entries/${entryId}`).set({
+    sheetSync: {
+      status,
+      action,
+      lastAttemptedAt: Date.now(),
+      lastSuccessAt: lastSuccessAt ?? null,
+      revision,
+      lastError,
+    },
+  }, { merge: true }).catch(() => undefined);
+};
+
+const syncEntryDocument = async ({
+  action,
+  uid,
+  entryId,
+  payload,
+  markState,
+}: {
+  action: EntrySyncAction;
+  uid: string;
+  entryId: string;
+  payload?: Record<string, unknown>;
+  markState: boolean;
+}) => {
+  const entryRef = firestore.doc(`users/${uid}/entries/${entryId}`);
+  const entrySnap = payload ? null : await entryRef.get();
+  const sourceData = payload || (entrySnap?.exists ? entrySnap.data() as Record<string, unknown> : undefined);
+
+  if (!sourceData) {
+    throw new HttpsError('not-found', 'Entry not found for sync.');
+  }
+
+  const entry = toEntryDocument(entryId, sourceData);
+  const revision = (entry.sheetSync?.revision || 0) + 1;
+
+  if (markState && action !== 'delete') {
+    await writeEntrySyncState({ uid, entryId, action, revision, status: 'pending', lastError: null });
+  }
+
+  try {
+    await getSheetsService().syncEntry(action, {
+      ...entry,
+      user: uid,
+      id: entryId,
+    });
+    if (markState && action !== 'delete') {
+      await writeEntrySyncState({
+        uid,
+        entryId,
+        action,
+        revision,
+        status: 'synced',
+        lastError: null,
+        lastSuccessAt: Date.now(),
+      });
+    }
+    return { revision };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    logger.error('Sheets sync failed', { entryId, uid, action, error });
+    if (markState && action !== 'delete') {
+      await writeEntrySyncState({
+        uid,
+        entryId,
+        action,
+        revision,
+        status: 'failed',
+        lastError: message,
+      });
+    }
+    throw new HttpsError('internal', message);
+  }
+};
+
+export const syncEntryToSheets = onCall(
   {
-    document: 'users/{uid}/entries/{entryId}',
     region: 'asia-southeast1',
     secrets: [GOOGLE_SERVICE_ACCOUNT_JSON],
   },
-  async (event) => {
-    const beforeData = event.data?.before.exists ? event.data.before.data() as Record<string, unknown> : undefined;
-    const afterData = event.data?.after.exists ? event.data.after.data() as Record<string, unknown> : undefined;
-
-    if (beforeData && afterData) {
-      const beforeComparable = sanitizeEntryForComparison(beforeData);
-      const afterComparable = sanitizeEntryForComparison(afterData);
-      if (JSON.stringify(beforeComparable) === JSON.stringify(afterComparable)) {
-        return;
-      }
+  async (request) => {
+    if (!request.auth?.uid) {
+      throw new HttpsError('unauthenticated', 'Authentication required.');
     }
 
-    const uid = event.params.uid;
-    const entryId = event.params.entryId;
-    const action = !beforeData && afterData ? 'create' : beforeData && afterData ? 'update' : 'delete';
-    const sourceData = afterData || beforeData;
-    if (!sourceData) return;
+    const action = String(request.data?.action || '').trim() as EntrySyncAction;
+    if (!['create', 'update', 'delete'].includes(action)) {
+      throw new HttpsError('invalid-argument', 'action must be create, update, or delete.');
+    }
+    const uid = resolveSyncUid(request, request.data?.uid);
+    const entryId = String(request.data?.entryId || '').trim();
+    if (!entryId) {
+      throw new HttpsError('invalid-argument', 'entryId is required.');
+    }
 
-    const entry = toEntryDocument(entryId, sourceData);
-    const revision = (entry.sheetSync?.revision || 0) + 1;
-    const targetRef = afterData ? event.data?.after.ref : null;
+    const payload = request.data?.entry && typeof request.data.entry === 'object'
+      ? request.data.entry as Record<string, unknown>
+      : undefined;
+    await syncEntryDocument({
+      action,
+      uid,
+      entryId,
+      payload,
+      markState: true,
+    });
 
-    if (targetRef) {
-      await targetRef.set({
-        sheetSync: {
-          status: 'pending',
+    return {
+      ok: true,
+      action,
+      syncedAt: Date.now(),
+    };
+  },
+);
+
+export const adminBackfillSheets = onCall(
+  {
+    region: 'asia-southeast1',
+    secrets: [GOOGLE_SERVICE_ACCOUNT_JSON],
+  },
+  async (request) => {
+    if (!request.auth?.token?.email || !isSuperAdminEmail(String(request.auth.token.email))) {
+      throw new HttpsError('permission-denied', 'Only super admin can run sheets backfill.');
+    }
+
+    const scope = String(request.data?.scope || 'all') === 'uid' ? 'uid' : 'all';
+    const dryRun = Boolean(request.data?.dryRun);
+    const uid = scope === 'uid' ? String(request.data?.uid || '').trim() : '';
+    if (scope === 'uid' && !uid) {
+      throw new HttpsError('invalid-argument', 'uid is required when scope=uid.');
+    }
+
+    const service = getSheetsService();
+    const snapshots = scope === 'uid'
+      ? await firestore.collection(`users/${uid}/entries`).get()
+      : await firestore.collectionGroup('entries').get();
+
+    let created = 0;
+    let updated = 0;
+    let skipped = 0;
+    let failed = 0;
+
+    for (const docSnap of snapshots.docs) {
+      const entryId = docSnap.id;
+      const data = docSnap.data() as Record<string, unknown>;
+      const entryUid = scope === 'uid'
+        ? uid
+        : String(docSnap.ref.parent.parent?.id || data.user || '').trim();
+
+      if (!entryUid) {
+        skipped += 1;
+        continue;
+      }
+
+      const existing = await service.getIndexRecord(entryId);
+      const action: EntrySyncAction = existing?.status === 'synced' ? 'update' : 'create';
+
+      if (dryRun) {
+        if (action === 'create') created += 1;
+        else updated += 1;
+        continue;
+      }
+
+      try {
+        await syncEntryDocument({
           action,
-          lastAttemptedAt: Date.now(),
-          revision,
-          lastError: null,
-        },
-      }, { merge: true });
+          uid: entryUid,
+          entryId,
+          payload: data,
+          markState: true,
+        });
+        if (action === 'create') created += 1;
+        else updated += 1;
+      } catch (error) {
+        failed += 1;
+        logger.error('Backfill sync failed', { entryId, uid: entryUid, error });
+      }
     }
 
-    try {
-      await getSheetsService().syncEntry(action, {
-        ...entry,
-        user: uid,
-        id: entryId,
-      });
-      if (targetRef) {
-        await targetRef.set({
-          sheetSync: {
-            status: 'synced',
-            action,
-            lastAttemptedAt: Date.now(),
-            lastSuccessAt: Date.now(),
-            revision,
-            lastError: null,
-          },
-        }, { merge: true });
-      }
-    } catch (error) {
-      logger.error('Sheets sync failed', { entryId, uid, action, error });
-      if (targetRef) {
-        await targetRef.set({
-          sheetSync: {
-            status: 'failed',
-            action,
-            lastAttemptedAt: Date.now(),
-            revision,
-            lastError: error instanceof Error ? error.message : String(error),
-          },
-        }, { merge: true });
-      }
-      throw error;
-    }
+    return {
+      ok: true,
+      scanned: snapshots.size,
+      created,
+      updated,
+      skipped,
+      failed,
+      dryRun,
+    };
   },
 );
 

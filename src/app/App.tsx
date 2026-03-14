@@ -17,7 +17,7 @@ import {
 } from 'firebase/auth';
 import { db, auth, googleProvider, createDriveProvider, firebaseApp } from '../lib/firebase/client';
 import {
-  adminDeleteUser as adminDeleteUserCallable,
+  syncEntryToSheets as syncEntryToSheetsCallable,
   generateMonthlySummary as generateMonthlySummaryCallable,
   getCalendarFeed as getCalendarFeedCallable,
   updateCalendarConfig as updateCalendarConfigCallable,
@@ -417,12 +417,14 @@ const GROUP_COLORS = [
 
 // ─── KPI EDITOR (Phase 5 — per-user, group CRUD, target) ─────────────────────
 function KpiEditor({
-  config, monthlyTarget, onSave, onClose,
+  config, monthlyTarget, onSave, onClose, title = 'จัดการ KPI ของฉัน', subtitle = 'กลุ่มงาน · รายการ · Credits · เป้าหมาย',
 }: {
   config: WorkGroups;
   monthlyTarget: number;
   onSave: (updated: WorkGroups, newTarget: number) => Promise<void>;
   onClose: () => void;
+  title?: string;
+  subtitle?: string;
 }) {
   const [draft, setDraft]             = useState<WorkGroups>(() => JSON.parse(JSON.stringify(config)));
   const [targetDraft, setTargetDraft] = useState<number>(monthlyTarget);
@@ -534,8 +536,8 @@ function KpiEditor({
           <X size={20} />
         </button>
         <div className="text-center">
-          <p className="font-bold text-[#2C2A28] text-[14px]">จัดการ KPI ของฉัน</p>
-          <p className="text-[9px] text-slate-400 mt-0.5">กลุ่มงาน · รายการ · Credits · เป้าหมาย</p>
+          <p className="font-bold text-[#2C2A28] text-[14px]">{title}</p>
+          <p className="text-[9px] text-slate-400 mt-0.5">{subtitle}</p>
         </div>
         <button
           onClick={handleSave}
@@ -1005,8 +1007,12 @@ export default function App() {
   const [summaryYear, setSummaryYear]       = useState(new Date().getFullYear());
   const [adminProfiles, setAdminProfiles]   = useState<UserProfile[]>([]);
   const [adminEntries, setAdminEntries]     = useState<WorkEntry[]>([]);
-  const [adminTargets, setAdminTargets]     = useState<Record<string, number>>({});
+  const [adminKpiConfigs, setAdminKpiConfigs] = useState<Record<string, { groups: WorkGroups; monthlyTarget: number; roleId?: string }>>({});
   const [adminLoading, setAdminLoading]     = useState(false);
+  const [adminMonth, setAdminMonth]         = useState(new Date().getMonth());
+  const [adminYear, setAdminYear]           = useState(new Date().getFullYear());
+  const [adminManagedUid, setAdminManagedUid] = useState<string | null>(null);
+  const [adminUserOrder, setAdminUserOrder] = useState<string[]>([]);
   const [dailyReports, setDailyReports]     = useState<DailyReport[]>([]);
   const [dailyReportsLoading, setDailyReportsLoading] = useState(false);
   const [dailySaving, setDailySaving]       = useState(false);
@@ -1057,6 +1063,7 @@ export default function App() {
   const [expandedGroups, setExpandedGroups]     = useState<Set<string>>(new Set());
   const [autoHoverExpand, setAutoHoverExpand]   = useState(false);
   const [hoveredGroup, setHoveredGroup]         = useState<string | null>(null);
+  const inFlightEntrySyncs = useRef(new Set<string>());
 
   // ── Offline detection
   useEffect(() => {
@@ -1123,6 +1130,16 @@ export default function App() {
   const showToast = (message: string) => {
     setToast({ show: true, message });
     setTimeout(() => setToast({ show: false, message: '' }), 2500);
+  };
+
+  const describeCallableError = (error: unknown) => {
+    const code = typeof error === 'object' && error && 'code' in error ? String((error as { code?: string }).code || '') : '';
+    const message = typeof error === 'object' && error && 'message' in error ? String((error as { message?: string }).message || '') : '';
+    if (code.endsWith('unauthenticated')) return 'กรุณาเข้าสู่ระบบใหม่';
+    if (code.endsWith('invalid-argument')) return message || 'ข้อมูลปฏิทินไม่ถูกต้อง';
+    if (code.endsWith('permission-denied')) return 'บัญชีนี้ไม่มีสิทธิ์เข้าถึงข้อมูลนี้';
+    if (code.endsWith('internal')) return 'เชื่อมต่อบริการเบื้องหลังไม่สำเร็จ';
+    return message || 'เชื่อมต่อบริการไม่สำเร็จ';
   };
 
   // ── Firebase Auth listener (Phase 3)
@@ -1272,7 +1289,7 @@ export default function App() {
     if (!currentUser || !isSuperAdmin) {
       setAdminProfiles([]);
       setAdminEntries([]);
-      setAdminTargets({});
+      setAdminKpiConfigs({});
       setAdminLoading(false);
       return;
     }
@@ -1303,11 +1320,15 @@ export default function App() {
     const unsubscribeKpi = onSnapshot(
       collection(db, 'kpiConfigs'),
       (snapshot) => {
-        const next: Record<string, number> = {};
+        const next: Record<string, { groups: WorkGroups; monthlyTarget: number; roleId?: string }> = {};
         snapshot.docs.forEach((d) => {
-          next[d.id] = Number(d.data()?.monthlyTarget || 0);
+          next[d.id] = {
+            groups: cloneGroups((d.data()?.groups as WorkGroups | undefined) || ZERO_STARTER_GROUPS),
+            monthlyTarget: Number(d.data()?.monthlyTarget || 0),
+            roleId: d.data()?.roleId ? String(d.data()?.roleId) : undefined,
+          };
         });
-        setAdminTargets(next);
+        setAdminKpiConfigs(next);
       },
       (error) => {
         console.error('Admin kpi listener:', error);
@@ -1385,21 +1406,27 @@ export default function App() {
     if (!currentUser) {
       setOrgCalendarConfig(DEFAULT_ORG_CALENDAR_CONFIG);
       setCalendarDraft(DEFAULT_ORG_CALENDAR_CONFIG);
+      setAdminUserOrder([]);
       return;
     }
 
     const unsubscribe = onSnapshot(
       doc(db, 'system', 'appConfig'),
       (snapshot) => {
+        const data = snapshot.data() || {};
         const next = {
           ...DEFAULT_ORG_CALENDAR_CONFIG,
-          ...(snapshot.data()?.calendar || {}),
+          ...(data.calendar || {}),
         } as OrgCalendarConfig;
         setOrgCalendarConfig(next);
         setCalendarDraft((prev) => (showSettings ? prev : next));
+        setAdminUserOrder(Array.isArray((data as { admin?: { userOrder?: string[] } }).admin?.userOrder)
+          ? (data as { admin?: { userOrder?: string[] } }).admin!.userOrder!.map((uid) => String(uid))
+          : []);
       },
       () => {
         setOrgCalendarConfig(DEFAULT_ORG_CALENDAR_CONFIG);
+        setAdminUserOrder([]);
       },
     );
 
@@ -1426,11 +1453,12 @@ export default function App() {
         if (cancelled) return;
         setCalendarEvents(data.events || []);
         setOrgCalendarConfig((prev) => ({ ...prev, ...data.config }));
+        setCalendarError(data.config?.lastSyncStatus === 'error' ? data.config.lastError || 'โหลดปฏิทินไม่สำเร็จ' : '');
       })
       .catch((error) => {
         if (cancelled) return;
         setCalendarEvents([]);
-        setCalendarError(error instanceof Error ? error.message : 'โหลดปฏิทินไม่สำเร็จ');
+        setCalendarError(describeCallableError(error));
       })
       .finally(() => {
         if (!cancelled) setCalendarLoading(false);
@@ -1910,6 +1938,34 @@ export default function App() {
     showToast('✅ บันทึก KPI Config แล้ว');
   };
 
+  const handleSaveManagedKpiConfig = async (uid: string, updated: WorkGroups, newTarget?: number) => {
+    if (!currentUser || !isSuperAdmin) return;
+    const profile = adminProfileMap.get(uid);
+    const seed = getInitialKpiForEmail(profile?.email);
+    const target = Math.max(0, Number(newTarget ?? adminKpiConfigs[uid]?.monthlyTarget ?? seed.monthlyTarget) || 0);
+    await setDoc(doc(db, 'kpiConfigs', uid), {
+      groups: updated,
+      monthlyTarget: target,
+      uid,
+      roleId: profile?.role || adminKpiConfigs[uid]?.roleId || seed.roleId,
+      policyVersion: KPI_POLICY_VERSION,
+      updatedAt: Date.now(),
+    }, { merge: true });
+    setAdminKpiConfigs((prev) => ({
+      ...prev,
+      [uid]: {
+        groups: cloneGroups(updated),
+        monthlyTarget: target,
+        roleId: profile?.role || prev[uid]?.roleId || seed.roleId,
+      },
+    }));
+    if (uid === currentUser.uid) {
+      setKpiConfig(updated);
+      setMonthlyTarget(target);
+    }
+    showToast('✅ บันทึก KPI Config แล้ว');
+  };
+
   // ── Local file picker (File System Access API with fallback)
   const handlePickLocalFile = async (): Promise<LocalFileRef[]> => {
     try {
@@ -1963,18 +2019,6 @@ export default function App() {
     () => Object.keys(kpiConfig).sort(),
     [kpiConfig]
   );
-
-  // ── Admin: delete user data from Firestore + notify webhook
-  const handleDeleteAdminUser = async (uid: string, nickname: string) => {
-    if (uid === currentUser?.uid) { showToast('ไม่สามารถลบตัวเองได้'); return; }
-    if (!window.confirm(`ลบผู้ใช้ "${nickname}" ออกจากระบบ?\n\nข้อมูลทั้งหมดจะถูกลบถาวร\n(Firebase Auth ยังอยู่ แต่ไม่มีข้อมูลใดๆ)`)) return;
-    try {
-      await adminDeleteUserCallable({ uid });
-      showToast(`ลบผู้ใช้ "${nickname}" แล้ว ✓`);
-    } catch (err) {
-      showToast('เกิดข้อผิดพลาด: ' + (err as Error).message);
-    }
-  };
 
   // ── Derived state
   const currentTask = useMemo(() => {
@@ -2293,12 +2337,12 @@ export default function App() {
   const isAtCurrentMonth = summaryMonth === new Date().getMonth() && summaryYear === new Date().getFullYear();
 
   const adminSummary = useMemo(() => {
-    const now = new Date();
     const profileByUid = new Map<string, UserProfile>(adminProfiles.map((p) => [p.uid, p]));
+    const orderMap = new Map<string, number>(adminUserOrder.map((uid, index) => [uid, index]));
     const monthEntries = adminEntries.filter((e) => {
       try {
-        const d = new Date(e.date);
-        return d.getMonth() === now.getMonth() && d.getFullYear() === now.getFullYear();
+        const d = new Date(`${e.date}T00:00:00`);
+        return d.getMonth() === adminMonth && d.getFullYear() === adminYear;
       } catch {
         return false;
       }
@@ -2314,13 +2358,13 @@ export default function App() {
     const allUserIds = new Set<string>([
       ...adminProfiles.map((p) => p.uid),
       ...Object.keys(byUser),
-      ...Object.keys(adminTargets),
+      ...Object.keys(adminKpiConfigs),
     ]);
 
     return Array.from(allUserIds)
       .map((uid) => {
         const profile = profileByUid.get(uid);
-        const target = adminTargets[uid] || 0;
+        const target = adminKpiConfigs[uid]?.monthlyTarget || 0;
         const credits = byUser[uid]?.credits || 0;
         const count = byUser[uid]?.count || 0;
         return {
@@ -2331,10 +2375,111 @@ export default function App() {
           credits,
           count,
           percent: Math.round(safePercent(credits, target)),
+          sortOrder: orderMap.get(uid) ?? Number.MAX_SAFE_INTEGER,
         };
       })
-      .sort((a, b) => b.credits - a.credits);
-  }, [adminEntries, adminProfiles, adminTargets]);
+      .sort((a, b) => {
+        if (a.sortOrder !== b.sortOrder) return a.sortOrder - b.sortOrder;
+        if (b.credits !== a.credits) return b.credits - a.credits;
+        return a.nickname.localeCompare(b.nickname, 'th');
+      });
+  }, [adminEntries, adminProfiles, adminKpiConfigs, adminMonth, adminYear, adminUserOrder]);
+
+  const adminProfileMap = useMemo(
+    () => new Map(adminProfiles.map((profile) => [profile.uid, profile])),
+    [adminProfiles],
+  );
+  const managedAdminProfile = adminManagedUid ? adminProfileMap.get(adminManagedUid) || null : null;
+  const managedAdminSeed = managedAdminProfile ? getInitialKpiForEmail(managedAdminProfile.email) : null;
+  const managedAdminConfig = adminManagedUid
+    ? adminKpiConfigs[adminManagedUid]?.groups || managedAdminSeed?.groups || ZERO_STARTER_GROUPS
+    : null;
+  const managedAdminTarget = adminManagedUid
+    ? adminKpiConfigs[adminManagedUid]?.monthlyTarget ?? managedAdminSeed?.monthlyTarget ?? 0
+    : 0;
+
+  const triggerEntrySync = async (
+    action: 'create' | 'update' | 'delete',
+    entry: WorkEntry,
+    options?: { silent?: boolean; successMessage?: string; failureMessage?: string },
+  ) => {
+    if (!currentUser) return;
+    const syncKey = `${action}:${entry.id}`;
+    if (inFlightEntrySyncs.current.has(syncKey)) return;
+    inFlightEntrySyncs.current.add(syncKey);
+    try {
+      await syncEntryToSheetsCallable({
+        action,
+        uid: currentUser.uid,
+        entryId: entry.id,
+        ...(action === 'delete' ? { entry } : {}),
+      });
+      if (options?.successMessage) showToast(options.successMessage);
+    } catch (error) {
+      console.error('Sheets sync failed:', error);
+      if (!options?.silent) {
+        showToast(options?.failureMessage || `ซิงก์ Sheet ไม่สำเร็จ: ${describeCallableError(error)}`);
+      }
+    } finally {
+      inFlightEntrySyncs.current.delete(syncKey);
+    }
+  };
+
+  useEffect(() => {
+    if (!currentUser || !isOnline) return;
+    const recoverable = entries
+      .filter((entry) => entry.sheetSync?.status && entry.sheetSync.status !== 'synced')
+      .slice(0, 3);
+    recoverable.forEach((entry) => {
+      void triggerEntrySync(entry.sheetSync?.action || 'update', entry, { silent: true });
+    });
+  }, [currentUser, entries, isOnline]);
+
+  const changeAdminMonth = (delta: number) => {
+    const next = adminMonth + delta;
+    if (next < 0) {
+      setAdminYear((year) => year - 1);
+      setAdminMonth(11);
+      return;
+    }
+    if (next > 11) {
+      setAdminYear((year) => year + 1);
+      setAdminMonth(0);
+      return;
+    }
+    setAdminMonth(next);
+  };
+
+  const persistAdminUserOrder = async (nextOrder: string[]) => {
+    if (!currentUser || !isSuperAdmin) return;
+    setAdminUserOrder(nextOrder);
+    try {
+      await setDoc(doc(db, 'system', 'appConfig'), {
+        admin: {
+          userOrder: nextOrder,
+          updatedAt: Date.now(),
+        },
+      }, { merge: true });
+    } catch (error) {
+      console.error('Save admin order failed:', error);
+      showToast(`บันทึกลำดับรายชื่อไม่สำเร็จ: ${(error as Error).message}`);
+    }
+  };
+
+  const handleMoveAdminUser = async (uid: string, direction: -1 | 1) => {
+    const currentOrder = adminSummary.map((row) => row.uid);
+    const index = currentOrder.indexOf(uid);
+    const nextIndex = index + direction;
+    if (index < 0 || nextIndex < 0 || nextIndex >= currentOrder.length) return;
+    const nextOrder = [...currentOrder];
+    [nextOrder[index], nextOrder[nextIndex]] = [nextOrder[nextIndex], nextOrder[index]];
+    await persistAdminUserOrder(nextOrder);
+  };
+
+  const openManagedKpiEditor = (uid: string) => {
+    setAdminManagedUid(uid);
+    setShowKpiEditor(true);
+  };
 
   // ── CRUD handlers
   const handleAddEntry = async () => {
@@ -2378,6 +2523,10 @@ export default function App() {
     try {
       await setDoc(doc(db, 'users', currentUser.uid, 'entries', id), newEntry);
       showToast(`บันทึกแล้ว +${newEntry.credits} Cr.`);
+      void triggerEntrySync('create', newEntry, {
+        silent: true,
+        failureMessage: 'บันทึกแล้ว แต่ซิงก์ Google Sheet ยังไม่สำเร็จ',
+      });
       setQuantity(1);
       setNotes('');
       setCanvaLink('');
@@ -2422,6 +2571,10 @@ export default function App() {
       await setDoc(doc(db, 'users', currentUser.uid, 'entries', updated.id), updated);
       setEditEntry(null);
       showToast('อัปเดตแล้ว');
+      void triggerEntrySync('update', updated, {
+        silent: true,
+        failureMessage: 'อัปเดตแล้ว แต่ซิงก์ Google Sheet ยังไม่สำเร็จ',
+      });
     } catch (e) {
       console.error(e);
       showToast('❌ อัปเดตไม่สำเร็จ');
@@ -2432,11 +2585,18 @@ export default function App() {
 
   const handleDelete = async (id: string) => {
     if (!currentUser) return;
+    const deletedEntry = entries.find((entry) => entry.id === id);
     setIsLoading(true);
     try {
       await deleteDoc(doc(db, 'users', currentUser.uid, 'entries', id));
       setDeleteId(null);
       showToast('ลบเรียบร้อย');
+      if (deletedEntry) {
+        void triggerEntrySync('delete', deletedEntry, {
+          silent: false,
+          failureMessage: 'ลบแล้ว แต่ยังลบจาก Google Sheet ไม่สำเร็จ',
+        });
+      }
     } catch (e) {
       console.error(e);
       showToast('❌ ลบไม่สำเร็จ');
@@ -2759,10 +2919,23 @@ export default function App() {
       {/* KPI Editor (Phase 5) */}
       {showKpiEditor && (
         <KpiEditor
-          config={kpiConfig}
-          monthlyTarget={monthlyTarget}
-          onSave={handleSaveKpiConfig}
-          onClose={() => setShowKpiEditor(false)}
+          config={adminManagedUid && managedAdminConfig ? managedAdminConfig : kpiConfig}
+          monthlyTarget={adminManagedUid ? managedAdminTarget : monthlyTarget}
+          onSave={(updated, newTarget) => (
+            adminManagedUid
+              ? handleSaveManagedKpiConfig(adminManagedUid, updated, newTarget)
+              : handleSaveKpiConfig(updated, newTarget)
+          )}
+          onClose={() => {
+            setShowKpiEditor(false);
+            setAdminManagedUid(null);
+          }}
+          title={adminManagedUid
+            ? `จัดการ KPI ของ ${managedAdminProfile?.nickname || managedAdminProfile?.displayName || managedAdminProfile?.email || 'สมาชิก'}`
+            : 'จัดการ KPI ของฉัน'}
+          subtitle={adminManagedUid
+            ? 'ปรับกลุ่มงาน · รายการ · Credits · เป้าหมายรายเดือน'
+            : 'กลุ่มงาน · รายการ · Credits · เป้าหมาย'}
         />
       )}
 
@@ -2984,6 +3157,7 @@ export default function App() {
           onSignOut={handleSignOut}
           openKpiEditor={() => {
             setShowSettings(false);
+            setAdminManagedUid(null);
             setShowKpiEditor(true);
           }}
           runtimeProjectId={runtimeProjectId}
@@ -3195,12 +3369,18 @@ export default function App() {
 
         {activeTab === 'admin' && isSuperAdmin && (
           <AdminTab
-            adminProfiles={adminProfiles}
             adminSummary={adminSummary}
-            adminEntries={adminEntries}
+            totalUsers={adminProfiles.length}
+            totalEntries={adminEntries.length}
             adminLoading={adminLoading}
             currentUserUid={currentUser?.uid}
-            handleDeleteAdminUser={handleDeleteAdminUser}
+            month={adminMonth}
+            year={adminYear}
+            onPrevMonth={() => changeAdminMonth(-1)}
+            onNextMonth={() => changeAdminMonth(1)}
+            onManageUser={openManagedKpiEditor}
+            onMoveUp={(uid) => { void handleMoveAdminUser(uid, -1); }}
+            onMoveDown={(uid) => { void handleMoveAdminUser(uid, 1); }}
           />
         )}
         </div>

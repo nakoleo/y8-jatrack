@@ -324,6 +324,11 @@ export class SheetsSyncService {
     });
   }
 
+  async getIndexRecord(entryId: string) {
+    await this.ensureBaseSheets();
+    return this.findIndexRecord(entryId);
+  }
+
   async deleteUserArtifacts(uid: string, nickname: string) {
     await this.ensureBaseSheets();
     const masterRows = await this.gateway.getRows(MASTER_SHEET);

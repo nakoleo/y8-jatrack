@@ -17,7 +17,7 @@ export const firebaseApp = initializeApp(firebaseConfig);
 export const db = getFirestore(firebaseApp);
 export const auth = getAuth(firebaseApp);
 export const storage = getStorage(firebaseApp);
-export const functions = getFunctions(firebaseApp);
+export const functions = getFunctions(firebaseApp, 'asia-southeast1');
 
 export const googleProvider = new GoogleAuthProvider();
 googleProvider.setCustomParameters({ include_granted_scopes: 'true' });

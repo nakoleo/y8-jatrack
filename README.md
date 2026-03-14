@@ -10,14 +10,17 @@ KPI tracking app for Y8/PV teams (mobile-first, Firebase + Google integrations).
   - Other emails => `Custom` with starter KPI = 0 (editable)
 - User-isolated data in Firestore (`users/{uid}/entries` + `kpiConfigs/{uid}`)
 - Super admin can view all users in `Admin` tab
+- Admin view supports monthly KPI comparison per person with reorder controls
+- Super admin can open and edit another user's KPI/groups/tasks from Admin
 - KPI config editor per user
-- Firestore-first entry lifecycle with backend Google Sheets sync (`create / update / delete` by `entry_id`)
+- Firestore-first entry lifecycle with background callable Google Sheets sync (`create / update / delete` by `entry_id`)
 - Work logs with optional attachment links:
   - Canva URL
   - Google Drive URL (manual or direct upload from app)
 - Google Drive direct upload (`drive.file` scope) with optional default folder ID
 - Cloud Functions backend for:
-  - Google Sheets authoritative sync via Google Sheets API
+  - Google Sheets authoritative sync via callable functions + Google Sheets API
+  - Admin backfill / replay for Sheets
   - Recursive admin delete cleanup
   - Server-side AI monthly summary
 - Google Calendar iCal feed viewer (Y8 + PV)
@@ -63,6 +66,7 @@ Legacy sandbox code remains under `archive/jatrack-daily/` and is excluded from 
    - `firebase functions:secrets:set GEMINI_API_KEY`
    - `firebase functions:config:set` is not used in this version
    - Set param `SHEETS_SPREADSHEET_ID` during deploy/runtime
+   - Functions region is `asia-southeast1`
 4. Enable in Firebase/Google Cloud:
    - Authentication > Sign-in method > Google
    - Firestore Database
@@ -99,11 +103,13 @@ Production URLs:
 
 - Use Settings in app to save:
   - Nickname (required for sheet naming/report identity)
-  - Google Sheet URL
+  - Google Sheet URL (personal/export reference only)
   - Google Drive folder ID (optional)
-  - Calendar iCal URLs
-- Google Sheets system sync status is now read-only in the app because it runs via backend
+  - Central calendar is admin-managed; normal users do not edit the feed URL
+- Google Sheets system sync status is read-only in the app because it runs via backend callable functions
 - AI Summary now runs on backend; user devices do not store Gemini API keys
+- Production no longer relies on Firestore trigger-based sheet sync
+- Legacy sandbox remains under `archive/jatrack-daily/`
 - If Google Drive upload fails:
   - Reconnect Google Drive from Settings (consent popup)
   - Verify Google Drive API is enabled in Google Cloud project

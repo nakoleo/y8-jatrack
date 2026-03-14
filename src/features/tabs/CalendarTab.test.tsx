@@ -46,6 +46,7 @@ describe('CalendarTab', () => {
   it('filters launch events', () => {
     render(<CalendarTab config={config} events={events} loading={false} error="" />);
 
+    fireEvent.click(screen.getByRole('button', { name: 'Agenda' }));
     fireEvent.click(screen.getByRole('button', { name: 'Launch' }));
 
     expect(screen.getByText('Launch event')).toBeInTheDocument();
