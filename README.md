@@ -2,6 +2,8 @@
 
 KPI tracking app for Y8/PV teams (mobile-first, Firebase + Google integrations).
 
+Latest runtime summary: see [docs/HANDOFF_FOR_CLAUDE.md](/Users/nakoleo/Documents/COMPANIES/Y8%20-%20YOUNG%20AGE/Y8%20PROJECT/JATRACK%20APP/docs/HANDOFF_FOR_CLAUDE.md)
+
 ## Current capabilities
 
 - Google Sign-in with role policy by email
@@ -16,6 +18,7 @@ KPI tracking app for Y8/PV teams (mobile-first, Firebase + Google integrations).
 - KPI config editor per user
 - First-time users must complete nickname + display title onboarding before entering the main app
 - Firestore-first entry lifecycle with background callable Google Sheets sync (`create / update / delete` by `entry_id`)
+- Entry save/update payload is sanitized before Firestore writes so legacy KPI configs with missing optional fields do not block users like Gift from saving
 - Work logs with optional attachment links:
   - Canva URL
   - Google Drive URL (manual or direct upload from app)
@@ -26,7 +29,9 @@ KPI tracking app for Y8/PV teams (mobile-first, Firebase + Google integrations).
   - Recursive admin delete cleanup
   - Server-side AI monthly summary
 - Google Calendar iCal feed viewer (Y8 + PV)
+- Calendar supports both month grid and agenda views
 - Export reports (TXT / CSV / Space Sheet CSV) by month + year
+- Gift profile is currently pinned to a local avatar override and `Sr.Graphic Designer` title for consistent display across app/Admin
 
 ## Tech stack
 
@@ -110,10 +115,13 @@ Production URLs:
   - Google Drive folder ID (optional)
   - Central calendar is admin-managed; normal users do not edit the feed URL
 - Google Sheets system sync status is read-only in the app because it runs via backend callable functions
+- The top-right Wi-Fi icon now represents online/offline only; it no longer shows sheet sync backlog counts
 - AI Summary now runs on backend; user devices do not store Gemini API keys
 - Production no longer relies on Firestore trigger-based sheet sync
 - Legacy sandbox remains under `archive/jatrack-daily/`
 - Admin cards show each user's Google profile photo when available
+- Sign-in page was simplified to a single-card layout with lighter copy and current brand wording: `JaTrack` / `KPI Tracker by Y8PV`
+- Google Sheets can still hit per-user write quota (`429 rateLimitExceeded`) during heavy bursts or cleanup/backfill; normal app save remains Firestore-first and should still succeed, while sheet sync retries in the background
 - If Google Drive upload fails:
   - Reconnect Google Drive from Settings (consent popup)
   - Verify Google Drive API is enabled in Google Cloud project
