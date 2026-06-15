@@ -13,6 +13,11 @@ import type { EntryDocument, EntrySyncAction } from './types.js';
 initializeApp();
 
 const SUPER_ADMIN_EMAIL = 'info.nakoleo@gmail.com';
+const TRANSITIONAL_SUPER_ADMIN_EMAIL = 'creative.y8pv@gmail.com';
+const SUPER_ADMIN_EMAILS = [
+  SUPER_ADMIN_EMAIL,
+  TRANSITIONAL_SUPER_ADMIN_EMAIL,
+] as const;
 const SHEETS_SPREADSHEET_ID = defineString('SHEETS_SPREADSHEET_ID');
 const GOOGLE_SERVICE_ACCOUNT_JSON = defineSecret('GOOGLE_SERVICE_ACCOUNT_JSON');
 const GEMINI_API_KEY = defineSecret('GEMINI_API_KEY');
@@ -20,7 +25,8 @@ const GEMINI_API_KEY = defineSecret('GEMINI_API_KEY');
 const firestore = getFirestore();
 const adminAuth = getAuth();
 
-const isSuperAdminEmail = (email?: string | null) => (email || '').trim().toLowerCase() === SUPER_ADMIN_EMAIL;
+const isSuperAdminEmail = (email?: string | null) =>
+  SUPER_ADMIN_EMAILS.includes((email || '').trim().toLowerCase() as typeof SUPER_ADMIN_EMAILS[number]);
 
 const getSheetsService = () =>
   new SheetsSyncService(
