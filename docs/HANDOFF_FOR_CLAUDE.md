@@ -29,7 +29,7 @@ Project: `/Users/nakoleo/Documents/COMPANIES/Y8 - YOUNG AGE/Y8 PROJECT/JATRACK A
 - Client retries unsynced entries automatically while online
 
 ### Admin
-- Admin tab is intended for Orb / `info.nakoleo@gmail.com` only
+- Admin tab is intended for Orb. During the admin account transition, both `info.nakoleo@gmail.com` and `creative.y8pv@gmail.com` are super admins
 - Monthly KPI cards show:
   - month credits
   - monthly target
