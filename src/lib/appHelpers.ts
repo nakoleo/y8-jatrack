@@ -3,6 +3,10 @@ import { ROLE_DEFAULTS } from '@/config/roleDefaults';
 
 export const HOST_EMAIL = 'host.y8@gmail.com';
 export const SUPER_ADMIN_EMAIL = 'info.nakoleo@gmail.com';
+export const SUPER_ADMIN_EMAILS: readonly string[] = [
+  'info.nakoleo@gmail.com',
+  'creative.y8pv@gmail.com',
+];
 export const KPI_POLICY_VERSION = 3;
 export const EXPECTED_FIREBASE_PROJECT = 'jartrack-y8pv';
 export const EXPECTED_FIREBASE_AUTH_DOMAIN = 'jartrack-y8pv.firebaseapp.com';
@@ -36,7 +40,7 @@ export interface PendingUploadFile {
 
 export const normalizeEmail = (email?: string | null) => (email || '').trim().toLowerCase();
 export const isHostEmail = (email?: string | null) => normalizeEmail(email) === HOST_EMAIL;
-export const isSuperAdminEmail = (email?: string | null) => normalizeEmail(email) === SUPER_ADMIN_EMAIL;
+export const isSuperAdminEmail = (email?: string | null) => SUPER_ADMIN_EMAILS.includes(normalizeEmail(email));
 export const resolveRoleByEmail = (email?: string | null): RoleId =>
   isHostEmail(email) ? 'graphic_designer' : isSuperAdminEmail(email) ? 'art_director' : 'custom';
 

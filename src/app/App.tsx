@@ -49,7 +49,7 @@ import type {
 } from '@/domain/types';
 import { ROLE_DEFAULTS, ROLE_EMOJI } from '@/config/roleDefaults';
 import {
-  HOST_EMAIL, SUPER_ADMIN_EMAIL, KPI_POLICY_VERSION,
+  KPI_POLICY_VERSION,
   EXPECTED_FIREBASE_PROJECT, EXPECTED_FIREBASE_AUTH_DOMAIN,
   ZERO_STARTER_GROUPS, normalizeEmail, isHostEmail, isSuperAdminEmail,
   resolveRoleByEmail, cloneGroups, getTodayStr, dateToLocalStr,
