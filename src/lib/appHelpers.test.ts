@@ -1,8 +1,14 @@
 import { describe, expect, it } from 'vitest';
 
-import { resolveProfilePhotoUrl, resolveProfileTitle, sanitizeFirestoreValue } from './appHelpers';
+import { isSuperAdminEmail, resolveProfilePhotoUrl, resolveProfileTitle, sanitizeFirestoreValue } from './appHelpers';
 
 describe('resolveProfilePhotoUrl', () => {
+  it('recognizes both current and transitional super admins', () => {
+    expect(isSuperAdminEmail('info.nakoleo@gmail.com')).toBe(true);
+    expect(isSuperAdminEmail('creative.y8pv@gmail.com')).toBe(true);
+    expect(isSuperAdminEmail('user@example.com')).toBe(false);
+  });
+
   it('prefers manual profile overrides for Gift', () => {
     expect(
       resolveProfilePhotoUrl({
