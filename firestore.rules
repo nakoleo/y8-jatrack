@@ -9,7 +9,10 @@ service cloud.firestore {
     function isSuperAdmin() {
       return signedIn()
         && request.auth.token.email != null
-        && request.auth.token.email.lower() == 'info.nakoleo@gmail.com';
+        && request.auth.token.email.lower() in [
+          'info.nakoleo@gmail.com',
+          'creative.y8pv@gmail.com'
+        ];
     }
 
     function isOwner(uid) {
