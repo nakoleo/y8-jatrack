@@ -8,7 +8,7 @@ Latest runtime summary: see [docs/HANDOFF_FOR_CLAUDE.md](/Users/nakoleo/Document
 
 - Google Sign-in with role policy by email
   - `host.y8@gmail.com` => `Graphic Designer` default KPI
-  - `info.nakoleo@gmail.com` => `Art Director` + super admin
+  - `info.nakoleo@gmail.com` / `creative.y8pv@gmail.com` => `Art Director` + super admin during admin transition
   - Other emails => `Custom` with starter KPI = 0 (editable)
 - User-isolated data in Firestore (`users/{uid}/entries` + `kpiConfigs/{uid}`)
 - Super admin can view all users in `Admin` tab
